@@ -63,11 +63,23 @@ export const HOJAS = {
     ],
   },
   Cultivos: {
-    columnas: ["Nombre", "Variedad", "Días al cosechar", "Emoji"],
+    columnas: ["Nombre", "Emoji", "Duración total (días)", "Unidad de cosecha"],
     ejemplos: [
-      ["Chile", "Jalapeño", 90, "🌶️"],
-      ["Ajo",   "Morado",   180, "🧄"],
-      ["Maíz",  "Amarillo", 120, "🌽"],
+      ["Maíz",  "🌽", 150, "toneladas"],
+      ["Ajo",   "🧄", 250, "kg"],
+      ["Chile", "🌶️", 180, "cajas"],
+    ],
+  },
+  Fenología: {
+    columnas: ["Cultivo", "Etapa", "Día inicio", "Día fin"],
+    ejemplos: [
+      ["Maíz", "Preparación de suelo", 0, 14],
+      ["Maíz", "Siembra", 14, 21],
+      ["Maíz", "Emergencia", 21, 40],
+      ["Maíz", "Crecimiento", 40, 100],
+      ["Maíz", "Floración", 100, 125],
+      ["Maíz", "Llenado de grano", 125, 145],
+      ["Maíz", "Cosecha", 145, 150],
     ],
   },
 };
@@ -102,7 +114,16 @@ const INSTRUCCIONES = [
   [""],
   ["• Proveedores:  proveedores de insumos."],
   [""],
-  ["• Cultivos:     catálogo de cultivos con su variedad y días al cosechar."],
+  ["• Cultivos:     catálogo de cultivos con su emoji, duración total y unidad de cosecha."],
+  [""],
+  ["• Fenología:    etapas de cada cultivo (días de inicio y fin de cada etapa)."],
+  ["                Por cada cultivo, agrega tantas filas como etapas tenga."],
+  ["                Ejemplo para Maíz:"],
+  ["                    Cultivo: Maíz, Etapa: Preparación de suelo, Día inicio: 0,  Día fin: 14"],
+  ["                    Cultivo: Maíz, Etapa: Siembra,             Día inicio: 14, Día fin: 21"],
+  ["                    Cultivo: Maíz, Etapa: Emergencia,          Día inicio: 21, Día fin: 40"],
+  ["                    ... y así hasta cosecha."],
+  ["                Importante: el 'Cultivo' debe escribirse igual que en la hoja 'Cultivos'."],
   [""],
   ["Notas importantes:"],
   [""],
@@ -256,16 +277,36 @@ export function excelAColecciones(datosExcel) {
     });
   });
 
-  // Cultivos
-  (datosExcel.Cultivos || []).forEach((f, i) => {
+  // Cultivos (junta con fenología si hay)
+  // Primero indexamos la fenología por nombre de cultivo
+  const fenologiaPorCultivo = {};
+  (datosExcel["Fenología"] || []).forEach(f => {
+    const nombreCultivo = (f["Cultivo"] || "").toString().trim();
+    if (!nombreCultivo) return;
+    const etapa = (f["Etapa"] || "").toString().trim();
+    if (!etapa) return;
+    if (!fenologiaPorCultivo[nombreCultivo]) fenologiaPorCultivo[nombreCultivo] = [];
+    fenologiaPorCultivo[nombreCultivo].push({
+      etapa,
+      diaInicio: parseInt(f["Día inicio"]) || 0,
+      diaFin: parseInt(f["Día fin"]) || 0,
+    });
+  });
+  // Ordenar las etapas de cada cultivo por día de inicio
+  Object.keys(fenologiaPorCultivo).forEach(k => {
+    fenologiaPorCultivo[k].sort((a, b) => a.diaInicio - b.diaInicio);
+  });
+
+  (datosExcel.Cultivos || []).forEach((f) => {
     const nombre = (f["Nombre"] || "").toString().trim();
     if (!nombre) return;
     out.cultivos.push({
-      id: `c_${nombre.toLowerCase().replace(/\s+/g, "_")}`,
+      id: `cul_${nombre.toLowerCase().replace(/\s+/g, "_")}`,
       nombre,
-      variedad: (f["Variedad"] || "").toString().trim(),
-      dias_cosecha: parseInt(f["Días al cosechar"]) || 0,
       emoji: (f["Emoji"] || "🌱").toString().trim() || "🌱",
+      duracionDias: parseInt(f["Duración total (días)"]) || 0,
+      unidadCosecha: (f["Unidad de cosecha"] || "kg").toString().trim(),
+      fenologia: fenologiaPorCultivo[nombre] || [],
     });
   });
 
@@ -317,6 +358,19 @@ export function validar(colecciones) {
   verificarPins(colecciones.agronomos || [], "Agrónomo");
   verificarPins(colecciones.cuadrillas || [], "Cuadrilla");
 
+  // Validar coherencia de fenología con cultivos
+  const nombresCultivos = new Set((colecciones.cultivos || []).map(c => c.nombre));
+  (colecciones.cultivos || []).forEach(c => {
+    if (c.fenologia && c.fenologia.length > 0) {
+      // Verificar que las etapas no se traslapen ni tengan inicio mayor que fin
+      c.fenologia.forEach(e => {
+        if (e.diaFin < e.diaInicio) errores.push(`Fenología de "${c.nombre}" — etapa "${e.etapa}": día fin (${e.diaFin}) es menor que día inicio (${e.diaInicio})`);
+        if (c.duracionDias > 0 && e.diaFin > c.duracionDias) advertencias.push(`Fenología de "${c.nombre}" — etapa "${e.etapa}" termina en día ${e.diaFin}, pero el cultivo dura ${c.duracionDias} días`);
+      });
+    } else if (c.fenologia && c.fenologia.length === 0) {
+      advertencias.push(`Cultivo "${c.nombre}": sin etapas de fenología (no aparecerá su calendario)`);
+    }
+  });
   return { ok: errores.length === 0, errores, advertencias };
 }
 
