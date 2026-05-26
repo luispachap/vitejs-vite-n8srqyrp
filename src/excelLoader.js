@@ -1,0 +1,370 @@
+// ============================================================
+//  AgroGestión — Cargador de Excel
+//  Agroselectos P&A
+//
+//  Lee y escribe archivos Excel con las hojas:
+//  Instrucciones, Cuentas, Parcelas, Trabajadores, Encargados,
+//  Agrónomos, Cuadrillas, Proveedores, Cultivos.
+// ============================================================
+
+import * as XLSX from "xlsx";
+
+// ------------------------------------------------------------
+//  ESTRUCTURA DE LAS HOJAS
+//  Define qué columnas tiene cada hoja y qué tipo son.
+// ------------------------------------------------------------
+export const HOJAS = {
+  Cuentas: {
+    columnas: ["Nombre", "Correo", "Contraseña inicial", "Rol"],
+    ejemplos: [
+      ["Juan Pérez García", "juan@agroselectos.com", "Temporal2026!", "admin"],
+      ["María López",       "maria@agroselectos.com", "Temporal2026!", "finanzas"],
+    ],
+    roles_validos: ["admin", "dueno", "finanzas", "encargado", "agronomo"],
+  },
+  Parcelas: {
+    columnas: ["Nombre", "Ubicación", "Hectáreas", "Cultivo actual", "Emoji", "Notas"],
+    ejemplos: [
+      ["Rancho 1", "R01", 5.2, "Chile", "🌶️", ""],
+      ["Rancho 2", "R02", 3.8, "Ajo",   "🧄", ""],
+    ],
+  },
+  Trabajadores: {
+    columnas: ["Nombre", "PIN", "Sueldo diario", "Categoría", "Notas"],
+    ejemplos: [
+      ["Juan Pérez",   "1111", 350, "Tractorista", ""],
+      ["Pablo Ramírez","2222", 280, "Jornalero",   ""],
+      ["Miguel Solís", "3333", 400, "Dronero",     ""],
+    ],
+  },
+  Encargados: {
+    columnas: ["Nombre", "PIN", "Sueldo diario", "Notas"],
+    ejemplos: [
+      ["Pedro Ramírez", "5555", 600, ""],
+    ],
+  },
+  Agrónomos: {
+    columnas: ["Nombre", "PIN", "Notas"],
+    ejemplos: [
+      ["Luis Herrera", "7777", ""],
+    ],
+  },
+  Cuadrillas: {
+    columnas: ["Nombre", "PIN", "Miembros", "Flete diario", "Notas"],
+    ejemplos: [
+      ["Cuadrilla Norte", "8888", 8, 500, ""],
+      ["Cuadrilla Sur",   "9999", 6, 400, ""],
+    ],
+  },
+  Proveedores: {
+    columnas: ["Nombre", "Teléfono", "Dirección", "Notas"],
+    ejemplos: [
+      ["Agroquímicos del Bajío", "555-1234", "Aguascalientes", ""],
+    ],
+  },
+  Cultivos: {
+    columnas: ["Nombre", "Variedad", "Días al cosechar", "Emoji"],
+    ejemplos: [
+      ["Chile", "Jalapeño", 90, "🌶️"],
+      ["Ajo",   "Morado",   180, "🧄"],
+      ["Maíz",  "Amarillo", 120, "🌽"],
+    ],
+  },
+};
+
+const INSTRUCCIONES = [
+  ["AGROGESTIÓN — Plantilla de carga inicial"],
+  ["Agroselectos P&A"],
+  [""],
+  ["Cómo usar este archivo:"],
+  ["1. Llena las hojas con los datos de tu rancho."],
+  ["2. Puedes dejar hojas vacías si no las necesitas todavía."],
+  ["3. No cambies los nombres de las columnas (primera fila de cada hoja)."],
+  ["4. Borra las filas de ejemplo antes de guardar tu versión final."],
+  ["5. Cuando termines, guarda el archivo y súbelo en la app: Inicio → Subir a la nube → Cargar plantilla."],
+  [""],
+  ["Qué hace cada hoja:"],
+  [""],
+  ["• Cuentas:    personas que administran (admin, dirección, finanzas, encargado, agrónomo)."],
+  ["              Entran a la app con correo y contraseña."],
+  ["              Roles válidos: admin, dueno, finanzas, encargado, agronomo"],
+  [""],
+  ["• Parcelas:   los terrenos del rancho con sus hectáreas y cultivo actual."],
+  [""],
+  ["• Trabajadores: trabajadores de planta con su PIN, sueldo y categoría."],
+  ["                Entran a la app con su PIN."],
+  [""],
+  ["• Encargados:   encargados con su PIN (también puedes darles cuenta en la hoja Cuentas)."],
+  [""],
+  ["• Agrónomos:    agrónomos con su PIN (también puedes darles cuenta en la hoja Cuentas)."],
+  [""],
+  ["• Cuadrillas:   grupos externos con PIN, número de miembros y flete diario."],
+  [""],
+  ["• Proveedores:  proveedores de insumos."],
+  [""],
+  ["• Cultivos:     catálogo de cultivos con su variedad y días al cosechar."],
+  [""],
+  ["Notas importantes:"],
+  [""],
+  ["– Los PINs deben ser únicos dentro de cada tipo (no puede haber dos trabajadores con el mismo PIN)."],
+  ["– Para crear las cuentas de administración, la app te dará un código SQL"],
+  ["  que tendrás que pegar en Supabase (instrucciones aparecen al cargar el Excel)."],
+  ["– Si te equivocas o subes el mismo archivo dos veces, la app te avisará y te"],
+  ["  preguntará qué hacer (sobrescribir, ignorar, etc.)."],
+];
+
+// ------------------------------------------------------------
+//  GENERAR PLANTILLA EXCEL
+// ------------------------------------------------------------
+export function generarPlantilla() {
+  const wb = XLSX.utils.book_new();
+
+  // Hoja de instrucciones
+  const wsInstr = XLSX.utils.aoa_to_sheet(INSTRUCCIONES);
+  wsInstr["!cols"] = [{ wch: 100 }];
+  XLSX.utils.book_append_sheet(wb, wsInstr, "Instrucciones");
+
+  // Hojas de datos
+  for (const [nombre, def] of Object.entries(HOJAS)) {
+    const rows = [def.columnas, ...def.ejemplos];
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    // Ancho de columnas razonable
+    ws["!cols"] = def.columnas.map(c => ({ wch: Math.max(c.length + 4, 18) }));
+    XLSX.utils.book_append_sheet(wb, ws, nombre);
+  }
+
+  // Descargar
+  XLSX.writeFile(wb, "AgroGestion-Plantilla.xlsx");
+}
+
+// ------------------------------------------------------------
+//  LEER ARCHIVO EXCEL Y CONVERTIR A OBJETOS
+// ------------------------------------------------------------
+export async function leerExcel(file) {
+  const buffer = await file.arrayBuffer();
+  const wb = XLSX.read(buffer, { type: "array" });
+  const resultado = {};
+
+  for (const [nombre, def] of Object.entries(HOJAS)) {
+    const ws = wb.Sheets[nombre];
+    if (!ws) { resultado[nombre] = []; continue; }
+    // Leer como array de objetos usando los encabezados de la primera fila
+    const filas = XLSX.utils.sheet_to_json(ws, { defval: "" });
+    // Filtrar filas vacías (las que tienen todos los campos en blanco)
+    const noVacias = filas.filter(f => Object.values(f).some(v => v !== "" && v !== null && v !== undefined));
+    resultado[nombre] = noVacias;
+  }
+  return resultado;
+}
+
+// ------------------------------------------------------------
+//  CONVERTIR datos del Excel → formato de la app
+// ------------------------------------------------------------
+export function excelAColecciones(datosExcel) {
+  const out = {
+    ranchos: [{ id: "r_agro", nombre: "Agroselectos P&A", hectareas: 0, lat: null, lng: null }],
+    parcelas: [],
+    trabajadores: [],
+    encargados: [],
+    agronomos: [],
+    cuadrillas: [],
+    proveedores: [],
+    cultivos: [],
+    cuentas: [], // especial: estos no van a una tabla, generan SQL
+  };
+
+  // Parcelas
+  (datosExcel.Parcelas || []).forEach((f, i) => {
+    const nombre = (f["Nombre"] || "").toString().trim();
+    if (!nombre) return;
+    out.parcelas.push({
+      id: `p_${(f["Ubicación"] || `p${i+1}`).toString().trim().toLowerCase().replace(/\s+/g, "_")}`,
+      ranchoId: "r_agro",
+      ubicacionId: (f["Ubicación"] || "").toString().trim(),
+      nombre,
+      cultivo: (f["Cultivo actual"] || "").toString().trim(),
+      hectareas: parseFloat(f["Hectáreas"]) || 0,
+      emoji: (f["Emoji"] || "🌾").toString().trim() || "🌾",
+      notas: (f["Notas"] || "").toString().trim(),
+      lat: null, lng: null, foto: null, cicloFenologico: [],
+    });
+  });
+
+  // Trabajadores
+  (datosExcel.Trabajadores || []).forEach((f, i) => {
+    const nombre = (f["Nombre"] || "").toString().trim();
+    if (!nombre) return;
+    out.trabajadores.push({
+      id: `t${Date.now()}${i}`,
+      nombre,
+      pin: (f["PIN"] || "").toString().trim(),
+      sueldo_dia: parseFloat(f["Sueldo diario"]) || 0,
+      categoria: (f["Categoría"] || "Jornalero").toString().trim(),
+      notas: (f["Notas"] || "").toString().trim(),
+    });
+  });
+
+  // Encargados
+  (datosExcel.Encargados || []).forEach((f, i) => {
+    const nombre = (f["Nombre"] || "").toString().trim();
+    if (!nombre) return;
+    out.encargados.push({
+      id: `en${Date.now()}${i}`,
+      nombre,
+      pin: (f["PIN"] || "").toString().trim(),
+      sueldo_dia: parseFloat(f["Sueldo diario"]) || 0,
+      notas: (f["Notas"] || "").toString().trim(),
+    });
+  });
+
+  // Agrónomos
+  (datosExcel["Agrónomos"] || []).forEach((f, i) => {
+    const nombre = (f["Nombre"] || "").toString().trim();
+    if (!nombre) return;
+    out.agronomos.push({
+      id: `ag${Date.now()}${i}`,
+      nombre,
+      pin: (f["PIN"] || "").toString().trim(),
+      notas: (f["Notas"] || "").toString().trim(),
+    });
+  });
+
+  // Cuadrillas
+  (datosExcel.Cuadrillas || []).forEach((f, i) => {
+    const nombre = (f["Nombre"] || "").toString().trim();
+    if (!nombre) return;
+    out.cuadrillas.push({
+      id: `cq${Date.now()}${i}`,
+      nombre,
+      pin: (f["PIN"] || "").toString().trim(),
+      miembros: parseInt(f["Miembros"]) || 0,
+      flete_dia: parseFloat(f["Flete diario"]) || 0,
+      notas: (f["Notas"] || "").toString().trim(),
+    });
+  });
+
+  // Proveedores
+  (datosExcel.Proveedores || []).forEach((f, i) => {
+    const nombre = (f["Nombre"] || "").toString().trim();
+    if (!nombre) return;
+    out.proveedores.push({
+      id: `pr${Date.now()}${i}`,
+      nombre,
+      telefono: (f["Teléfono"] || "").toString().trim(),
+      direccion: (f["Dirección"] || "").toString().trim(),
+      notas: (f["Notas"] || "").toString().trim(),
+    });
+  });
+
+  // Cultivos
+  (datosExcel.Cultivos || []).forEach((f, i) => {
+    const nombre = (f["Nombre"] || "").toString().trim();
+    if (!nombre) return;
+    out.cultivos.push({
+      id: `c_${nombre.toLowerCase().replace(/\s+/g, "_")}`,
+      nombre,
+      variedad: (f["Variedad"] || "").toString().trim(),
+      dias_cosecha: parseInt(f["Días al cosechar"]) || 0,
+      emoji: (f["Emoji"] || "🌱").toString().trim() || "🌱",
+    });
+  });
+
+  // Cuentas (no son colección, generan SQL aparte)
+  (datosExcel.Cuentas || []).forEach((f) => {
+    const correo = (f["Correo"] || "").toString().trim().toLowerCase();
+    if (!correo || !correo.includes("@")) return;
+    out.cuentas.push({
+      nombre: (f["Nombre"] || "").toString().trim(),
+      correo,
+      password: (f["Contraseña inicial"] || "").toString(),
+      rol: (f["Rol"] || "encargado").toString().trim().toLowerCase(),
+    });
+  });
+
+  return out;
+}
+
+// ------------------------------------------------------------
+//  VALIDAR datos antes de subir
+//  Devuelve { ok: bool, errores: [...], advertencias: [...] }
+// ------------------------------------------------------------
+export function validar(colecciones) {
+  const errores = [];
+  const advertencias = [];
+
+  // Validar Cuentas
+  const correosVistos = new Set();
+  const rolesValidos = HOJAS.Cuentas.roles_validos;
+  (colecciones.cuentas || []).forEach((c, i) => {
+    if (!c.correo) errores.push(`Cuenta fila ${i+2}: falta correo`);
+    if (correosVistos.has(c.correo)) errores.push(`Cuenta fila ${i+2}: correo repetido "${c.correo}"`);
+    correosVistos.add(c.correo);
+    if (!c.password || c.password.length < 6) errores.push(`Cuenta "${c.correo}": contraseña muy corta (mínimo 6 caracteres)`);
+    if (!rolesValidos.includes(c.rol)) errores.push(`Cuenta "${c.correo}": rol "${c.rol}" no válido. Debe ser uno de: ${rolesValidos.join(", ")}`);
+  });
+
+  // Validar PINs únicos dentro de cada grupo
+  const verificarPins = (lista, etiqueta) => {
+    const pins = new Set();
+    lista.forEach(x => {
+      if (!x.pin) { advertencias.push(`${etiqueta} "${x.nombre}": sin PIN (no podrá entrar)`); return; }
+      if (pins.has(x.pin)) errores.push(`${etiqueta}: PIN "${x.pin}" repetido`);
+      pins.add(x.pin);
+    });
+  };
+  verificarPins(colecciones.trabajadores || [], "Trabajador");
+  verificarPins(colecciones.encargados || [], "Encargado");
+  verificarPins(colecciones.agronomos || [], "Agrónomo");
+  verificarPins(colecciones.cuadrillas || [], "Cuadrilla");
+
+  return { ok: errores.length === 0, errores, advertencias };
+}
+
+// ------------------------------------------------------------
+//  GENERAR SQL para crear cuentas en Supabase Auth
+//  El usuario pega este SQL en Supabase → SQL Editor → Run
+// ------------------------------------------------------------
+export function generarSQLCuentas(cuentas) {
+  if (!cuentas || cuentas.length === 0) return "-- No hay cuentas para crear";
+
+  const lineas = [
+    "-- ============================================================",
+    "-- AGROGESTIÓN — Crear cuentas de administración",
+    "-- ============================================================",
+    "-- Este script crea las cuentas en Supabase Auth y sus perfiles.",
+    "-- Cópialo COMPLETO y pégalo en: Supabase → SQL Editor → Nueva consulta → Run",
+    "-- ============================================================",
+    "",
+  ];
+
+  cuentas.forEach((c, i) => {
+    // Genera un UUID determinista basado en el correo para que sea idempotente
+    lineas.push(`-- Cuenta ${i+1}: ${c.nombre} (${c.correo}) — rol: ${c.rol}`);
+    lineas.push(`DO $$`);
+    lineas.push(`DECLARE`);
+    lineas.push(`  nuevo_id uuid;`);
+    lineas.push(`BEGIN`);
+    lineas.push(`  -- Si la cuenta ya existe, no la duplica`);
+    lineas.push(`  SELECT id INTO nuevo_id FROM auth.users WHERE email = '${c.correo}';`);
+    lineas.push(`  IF nuevo_id IS NULL THEN`);
+    lineas.push(`    nuevo_id := gen_random_uuid();`);
+    lineas.push(`    INSERT INTO auth.users (id, instance_id, email, encrypted_password, email_confirmed_at, created_at, updated_at, raw_app_meta_data, raw_user_meta_data, aud, role)`);
+    lineas.push(`    VALUES (nuevo_id, '00000000-0000-0000-0000-000000000000', '${c.correo}', crypt('${c.password.replace(/'/g, "''")}', gen_salt('bf')), now(), now(), now(), '{"provider":"email","providers":["email"]}'::jsonb, '{}'::jsonb, 'authenticated', 'authenticated');`);
+    lineas.push(`    INSERT INTO auth.identities (id, user_id, identity_data, provider, provider_id, last_sign_in_at, created_at, updated_at)`);
+    lineas.push(`    VALUES (gen_random_uuid(), nuevo_id, format('{"sub":"%s","email":"%s"}', nuevo_id, '${c.correo}')::jsonb, 'email', '${c.correo}', now(), now(), now());`);
+    lineas.push(`  END IF;`);
+    lineas.push(`  -- Crear o actualizar perfil`);
+    lineas.push(`  INSERT INTO perfiles (id, nombre, rol) VALUES (nuevo_id, '${c.nombre.replace(/'/g, "''")}', '${c.rol}')`);
+    lineas.push(`  ON CONFLICT (id) DO UPDATE SET nombre = EXCLUDED.nombre, rol = EXCLUDED.rol;`);
+    lineas.push(`END $$;`);
+    lineas.push("");
+  });
+
+  lineas.push("-- ============================================================");
+  lineas.push("-- LISTO. Las cuentas ya pueden entrar a la app con su correo");
+  lineas.push("-- y la contraseña que pusiste en el Excel.");
+  lineas.push("-- Recuérdales que cambien su contraseña la primera vez que entren.");
+  lineas.push("-- ============================================================");
+
+  return lineas.join("\n");
+}

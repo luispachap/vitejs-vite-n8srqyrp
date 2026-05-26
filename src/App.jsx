@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, Component } from "react";
 import { supabase, supabaseListo } from "./supabase";
-import { migrarCatalogos, leerTodo, CATALOGOS } from "./dataApi";
+import { migrarCatalogos, leerTodo, CATALOGOS, subirColeccion } from "./dataApi";
+import { generarPlantilla, leerExcel, excelAColecciones, validar, generarSQLCuentas, HOJAS } from "./excelLoader";
 
 /* ════════════ LOGO ════════════ */
 /* Logo de Agroselectos P&A en formato base64. */
@@ -7989,18 +7990,60 @@ function GestionDeudas({ data, add, upd, del, session, onClose }) {
 }
 
 /* ════════════ MIGRACIÓN INICIAL A LA NUBE ════════════ */
-/* Sube los catálogos reales del rancho a Supabase la primera vez. */
+
+/* ════════════ MIGRACIÓN INICIAL DESDE EXCEL ════════════ */
+/* Permite descargar una plantilla, llenarla, y subirla a Supabase. */
 function SubirCatalogos({ data, session, onClose }) {
-  const [paso, setPaso] = useState("inicio"); // inicio | subiendo | hecho | error
+  const [paso, setPaso] = useState("inicio"); // inicio | revision | subiendo | hecho | error
+  const [archivoLeido, setArchivoLeido] = useState(null);
+  const [colecciones, setColecciones] = useState(null);
+  const [validacion, setValidacion] = useState(null);
+  const [sqlGenerado, setSqlGenerado] = useState("");
   const [resumen, setResumen] = useState(null);
   const [errorMsg, setErrorMsg] = useState("");
+  const fileRef = useRef(null);
+
+  const descargar = () => {
+    try { generarPlantilla(); }
+    catch (e) { alert("No se pudo descargar la plantilla: " + (e.message || e)); }
+  };
+
+  const cargarArchivo = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    try {
+      const datos = await leerExcel(file);
+      const cols = excelAColecciones(datos);
+      const val = validar(cols);
+      setArchivoLeido(file.name);
+      setColecciones(cols);
+      setValidacion(val);
+      setSqlGenerado(generarSQLCuentas(cols.cuentas));
+      setPaso("revision");
+    } catch (err) {
+      setErrorMsg(err.message || "Error al leer el archivo");
+      setPaso("error");
+    }
+  };
 
   const subir = async () => {
+    if (!colecciones) return;
     setPaso("subiendo");
     try {
-      const r = await migrarCatalogos(data);
+      const r = {};
+      // Subir cada catálogo (excepto cuentas, esas van por SQL aparte)
+      for (const tabla of CATALOGOS) {
+        const registros = colecciones[tabla] || [];
+        if (registros.length === 0) { r[tabla] = { ok: true, cantidad: 0, omitido: true }; continue; }
+        try {
+          const n = await subirColeccion(tabla, registros);
+          r[tabla] = { ok: true, cantidad: n };
+        } catch (e) {
+          r[tabla] = { ok: false, error: e.message };
+        }
+      }
       setResumen(r);
-      const huboError = Object.values(r).some(x => !x.ok);
+      const huboError = Object.values(r).some(x => x.ok === false);
       setPaso(huboError ? "error" : "hecho");
     } catch (e) {
       setErrorMsg(e.message || "Error desconocido");
@@ -8008,9 +8051,17 @@ function SubirCatalogos({ data, session, onClose }) {
     }
   };
 
-  // Resumen de cuántos registros hay en cada catálogo
-  const cuentas = CATALOGOS.map(c => ({ c, n: (data[c] || []).length }));
-  const total = cuentas.reduce((s, x) => s + x.n, 0);
+  const copiarSQL = () => {
+    navigator.clipboard.writeText(sqlGenerado)
+      .then(() => alert("SQL copiado. Pégalo en Supabase → SQL Editor → Run."))
+      .catch(() => alert("No se pudo copiar. Selecciona el texto y cópialo manualmente."));
+  };
+
+  // Resumen de cuántos registros encontró en el Excel
+  const cuentaSi = arr => arr && arr.length || 0;
+  const totalRegistros = colecciones
+    ? CATALOGOS.reduce((s, c) => s + cuentaSi(colecciones[c]), 0) + cuentaSi(colecciones.cuentas)
+    : 0;
 
   return (
     <div>
@@ -8019,40 +8070,110 @@ function SubirCatalogos({ data, session, onClose }) {
         <h2>Subir a la nube ☁️</h2>
       </div>
       <div className="section-pad">
+
         {paso === "inicio" && (
           <>
             <div className="card" style={{ background: "rgba(126,200,50,.06)", border: "1px solid rgba(126,200,50,.2)" }}>
-              <div className="card-title">¿Qué hace este paso?</div>
-              <div className="text-sm" style={{ lineHeight: 1.5 }}>
-                Sube los catálogos del rancho (ranchos, parcelas, trabajadores, encargados, agrónomos, cuadrillas, cultivos y proveedores) a la base de datos en la nube.
-              </div>
-              <div className="text-sm mt-2" style={{ lineHeight: 1.5 }}>
-                Los movimientos (cosechas, gastos, asistencia, etc.) NO se suben — esos los registrarás directamente en la nube de aquí en adelante.
+              <div className="card-title">¿Cómo funciona?</div>
+              <div className="text-sm" style={{ lineHeight: 1.6 }}>
+                1. Descarga la plantilla de Excel.<br/>
+                2. Llénala con los datos reales del rancho (cuentas, parcelas, trabajadores, etc.).<br/>
+                3. Súbela aquí y la app procesará todo automáticamente.
               </div>
             </div>
+
             <div className="card">
-              <div className="card-title">Lo que se va a subir</div>
-              {cuentas.map(({ c, n }) => (
+              <div className="card-title">Paso 1: descargar plantilla</div>
+              <div className="text-sm text-muted mb-3" style={{ lineHeight: 1.5 }}>
+                Excel con 8 hojas (Instrucciones + 7 catálogos), con ejemplos y encabezados ya listos.
+              </div>
+              <button className="btn btn-outline" onClick={descargar}>📥 Descargar plantilla</button>
+            </div>
+
+            <div className="card">
+              <div className="card-title">Paso 2: cargar plantilla llena</div>
+              <div className="text-sm text-muted mb-3" style={{ lineHeight: 1.5 }}>
+                Cuando tengas el Excel con tus datos, súbelo aquí.
+              </div>
+              <input ref={fileRef} type="file" accept=".xlsx,.xls"
+                style={{ display: "none" }} onChange={cargarArchivo} />
+              <button className="btn btn-accent" onClick={() => fileRef.current && fileRef.current.click()} disabled={!supabaseListo}>
+                {supabaseListo ? "📤 Elegir archivo Excel" : "La nube no está configurada"}
+              </button>
+            </div>
+          </>
+        )}
+
+        {paso === "revision" && colecciones && validacion && (
+          <>
+            <div className="card">
+              <div className="card-title">Archivo: {archivoLeido}</div>
+              <div className="text-sm text-muted">Esto es lo que encontré:</div>
+            </div>
+
+            <div className="card">
+              <div className="card-title">Resumen</div>
+              <div className="confirm-row"><span className="cr-label">Cuentas de administración</span><span className="cr-val">{cuentaSi(colecciones.cuentas)}</span></div>
+              {CATALOGOS.map(c => (
                 <div key={c} className="confirm-row">
                   <span className="cr-label">{c}</span>
-                  <span className="cr-val">{n} registro(s)</span>
+                  <span className="cr-val">{cuentaSi(colecciones[c])}</span>
                 </div>
               ))}
               <div className="confirm-row" style={{ borderTop: "2px solid var(--accent)", marginTop: 8, paddingTop: 10 }}>
                 <span className="cr-label" style={{ fontWeight: 700 }}>TOTAL</span>
-                <span className="cr-val" style={{ fontWeight: 700, color: "var(--accent)" }}>{total}</span>
+                <span className="cr-val" style={{ fontWeight: 700, color: "var(--accent)" }}>{totalRegistros}</span>
               </div>
             </div>
-            <div className="alert alert-gold">
-              <span className="alert-icon">⚠️</span>
-              <div className="alert-body">
-                <div className="alert-title">Importante</div>
-                <div className="alert-desc">Asegúrate de tener un respaldo antes de continuar. Este paso se hace una sola vez.</div>
+
+            {validacion.errores.length > 0 && (
+              <div className="alert alert-red">
+                <span className="alert-icon">❌</span>
+                <div className="alert-body">
+                  <div className="alert-title">Errores ({validacion.errores.length})</div>
+                  <div className="alert-desc">Corrige estos problemas antes de subir:</div>
+                  <ul style={{ margin: "8px 0 0 16px", padding: 0 }}>
+                    {validacion.errores.map((e, i) => <li key={i} className="text-sm">{e}</li>)}
+                  </ul>
+                </div>
               </div>
+            )}
+
+            {validacion.advertencias.length > 0 && (
+              <div className="alert alert-gold">
+                <span className="alert-icon">⚠️</span>
+                <div className="alert-body">
+                  <div className="alert-title">Advertencias</div>
+                  <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
+                    {validacion.advertencias.map((a, i) => <li key={i} className="text-sm">{a}</li>)}
+                  </ul>
+                </div>
+              </div>
+            )}
+
+            {cuentaSi(colecciones.cuentas) > 0 && (
+              <div className="card" style={{ background: "rgba(125,180,255,.08)", border: "1px solid rgba(125,180,255,.3)" }}>
+                <div className="card-title">🔐 Cuentas: paso especial</div>
+                <div className="text-sm" style={{ lineHeight: 1.5, marginBottom: 10 }}>
+                  La app no puede crear cuentas de administración directamente (por seguridad). Te genera un código SQL que tienes que pegar en Supabase:
+                </div>
+                <ol style={{ marginLeft: 18, fontSize: 13, lineHeight: 1.6 }}>
+                  <li>Copia el código de abajo.</li>
+                  <li>Ve a Supabase → SQL Editor → New query.</li>
+                  <li>Pega el código y dale Run.</li>
+                  <li>Listo: las cuentas quedan creadas en Supabase Auth.</li>
+                </ol>
+                <button className="btn btn-outline btn-sm mt-2" onClick={copiarSQL}>📋 Copiar código SQL</button>
+                <textarea readOnly value={sqlGenerado} style={{ width: "100%", height: 120, marginTop: 10, fontFamily: "monospace", fontSize: 11, padding: 8, borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg)" }} />
+              </div>
+            )}
+
+            <div className="gap-row mt-3">
+              <button className="btn btn-outline" style={{ flex: 1 }} onClick={() => setPaso("inicio")}>Cancelar</button>
+              <button className="btn btn-accent" style={{ flex: 1 }} onClick={subir} disabled={!validacion.ok}>
+                {validacion.ok ? "Subir catálogos →" : "Corrige errores primero"}
+              </button>
             </div>
-            <button className="btn btn-accent" onClick={subir} disabled={!supabaseListo}>
-              {supabaseListo ? "Subir catálogos a la nube" : "La nube no está configurada"}
-            </button>
           </>
         )}
 
@@ -8070,16 +8191,25 @@ function SubirCatalogos({ data, session, onClose }) {
               <span className="alert-icon">✅</span>
               <div className="alert-body">
                 <div className="alert-title">¡Listo!</div>
-                <div className="alert-desc">Los catálogos se subieron correctamente a la nube.</div>
+                <div className="alert-desc">Los catálogos se subieron correctamente.</div>
               </div>
             </div>
+            {cuentaSi(colecciones.cuentas) > 0 && (
+              <div className="alert alert-gold">
+                <span className="alert-icon">🔐</span>
+                <div className="alert-body">
+                  <div className="alert-title">No olvides las cuentas</div>
+                  <div className="alert-desc">Si todavía no pegaste el SQL de cuentas en Supabase, hazlo ahora. Sin eso, los administradores no podrán entrar.</div>
+                </div>
+              </div>
+            )}
             <div className="card">
               <div className="card-title">Resumen</div>
               {Object.entries(resumen || {}).map(([c, r]) => (
                 <div key={c} className="confirm-row">
                   <span className="cr-label">{c}</span>
                   <span className="cr-val" style={{ color: r.ok ? "var(--safe)" : "var(--red)" }}>
-                    {r.ok ? `✓ ${r.cantidad}` : `✗ ${r.error}`}
+                    {r.ok ? (r.omitido ? "— sin datos" : `✓ ${r.cantidad}`) : `✗ ${r.error}`}
                   </span>
                 </div>
               ))}
@@ -8094,7 +8224,7 @@ function SubirCatalogos({ data, session, onClose }) {
               <span className="alert-icon">❌</span>
               <div className="alert-body">
                 <div className="alert-title">Hubo un problema</div>
-                <div className="alert-desc">{errorMsg || "Algunas colecciones no se pudieron subir."}</div>
+                <div className="alert-desc">{errorMsg || "Algo salió mal. Revisa el detalle abajo."}</div>
               </div>
             </div>
             {resumen && (
@@ -8113,6 +8243,7 @@ function SubirCatalogos({ data, session, onClose }) {
             <button className="btn btn-outline" onClick={() => setPaso("inicio")}>Volver a intentar</button>
           </>
         )}
+
       </div>
     </div>
   );
