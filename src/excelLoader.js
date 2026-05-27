@@ -30,30 +30,30 @@ export const HOJAS = {
     ],
   },
   Trabajadores: {
-    columnas: ["Nombre", "PIN", "Sueldo diario", "Categoría", "Notas"],
+    columnas: ["Nombre", "PIN", "Sueldo diario", "Categoría", "Teléfono", "Notas"],
     ejemplos: [
-      ["Juan Pérez",   "1111", 350, "Tractorista", ""],
-      ["Pablo Ramírez","2222", 280, "Jornalero",   ""],
-      ["Miguel Solís", "3333", 400, "Dronero",     ""],
+      ["Juan Pérez",   "1111", 350, "Tractorista", "4491234567", ""],
+      ["Pablo Ramírez","2222", 280, "Jornalero",   "", ""],
+      ["Miguel Solís", "3333", 400, "Dronero",     "4499876543", ""],
     ],
   },
   Encargados: {
-    columnas: ["Nombre", "PIN", "Sueldo diario", "Notas"],
+    columnas: ["Nombre", "PIN", "Sueldo diario", "Teléfono", "Notas"],
     ejemplos: [
-      ["Pedro Ramírez", "5555", 600, ""],
+      ["Pedro Ramírez", "5555", 600, "4495551234", ""],
     ],
   },
   Agrónomos: {
-    columnas: ["Nombre", "PIN", "Notas"],
+    columnas: ["Nombre", "PIN", "Teléfono", "Notas"],
     ejemplos: [
-      ["Luis Herrera", "7777", ""],
+      ["Luis Herrera", "7777", "4497778888", ""],
     ],
   },
   Cuadrillas: {
-    columnas: ["Nombre", "PIN", "Miembros", "Flete diario", "Notas"],
+    columnas: ["Nombre", "PIN", "Miembros", "Flete diario", "Teléfono contacto", "Notas"],
     ejemplos: [
-      ["Cuadrilla Norte", "8888", 8, 500, ""],
-      ["Cuadrilla Sur",   "9999", 6, 400, ""],
+      ["Cuadrilla Norte", "8888", 8, 500, "4491112222", ""],
+      ["Cuadrilla Sur",   "9999", 6, 400, "", ""],
     ],
   },
   Proveedores: {
@@ -221,6 +221,7 @@ export function excelAColecciones(datosExcel) {
       pin: (f["PIN"] || "").toString().trim(),
       sueldo_dia: parseFloat(f["Sueldo diario"]) || 0,
       categoria: (f["Categoría"] || "Jornalero").toString().trim(),
+      telefono: (f["Teléfono"] || "").toString().trim(),
       notas: (f["Notas"] || "").toString().trim(),
     });
   });
@@ -234,6 +235,7 @@ export function excelAColecciones(datosExcel) {
       nombre,
       pin: (f["PIN"] || "").toString().trim(),
       sueldo_dia: parseFloat(f["Sueldo diario"]) || 0,
+      telefono: (f["Teléfono"] || "").toString().trim(),
       notas: (f["Notas"] || "").toString().trim(),
     });
   });
@@ -246,6 +248,7 @@ export function excelAColecciones(datosExcel) {
       id: `ag${Date.now()}${i}`,
       nombre,
       pin: (f["PIN"] || "").toString().trim(),
+      telefono: (f["Teléfono"] || "").toString().trim(),
       notas: (f["Notas"] || "").toString().trim(),
     });
   });
@@ -260,6 +263,7 @@ export function excelAColecciones(datosExcel) {
       pin: (f["PIN"] || "").toString().trim(),
       miembros: parseInt(f["Miembros"]) || 0,
       flete_dia: parseFloat(f["Flete diario"]) || 0,
+      telefono: (f["Teléfono contacto"] || "").toString().trim(),
       notas: (f["Notas"] || "").toString().trim(),
     });
   });

@@ -434,7 +434,16 @@ const INITIAL = {
 /* ════════════ UTILIDADES ════════════ */
 const fmt = n => new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", maximumFractionDigits: 0 }).format(n || 0);
 const fmtN = n => new Intl.NumberFormat("es-MX").format(n || 0);
-const today = () => new Date().toISOString().slice(0, 10);
+// Devuelve la fecha de HOY en la zona horaria local del dispositivo.
+// Importante: NO usar toISOString() porque devuelve UTC y a partir de las 6 PM
+// en México daría el día siguiente.
+const today = () => {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+};
 const mesActual = () => new Date().getMonth() + 1;
 
 /* Genera un reporte de texto de una aplicación y lo comparte o descarga.
@@ -485,6 +494,171 @@ function distKm(lat1, lng1, lat2, lng2) {
   const R = 6371, dLat = (lat2 - lat1) * Math.PI / 180, dLng = (lng2 - lng1) * Math.PI / 180;
   const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+/* ──── Cálculo de costo de mano de obra ──── */
+// Distribuye el sueldo diario de cada trabajador entre las parcelas donde
+// trabajó ese día, en proporción a las horas. Retorna un mapa parcelaId -> costo total.
+//
+// Lógica: para cada trabajador-día, costoPorHora = sueldoDiario / horasTotalesDelDía
+// Luego cada parcela recibe (horasEnParcela * costoPorHora).
+// Si un trabajador trabajó 4h en R01 y 4h en R02 con sueldo de $400:
+//   costoPorHora = 400/8 = 50 → R01 recibe $200, R02 recibe $200.
+//
+// Si solo trabajó 4h ese día (un solo bloque): 400/4 = 100/h → la parcela recibe $400 completo.
+function calcularCostoManoObra(actividades, trabajadores) {
+  // Estructura: { "trabajadorId|fecha": [actividad, actividad, ...] }
+  const porTrabajadorDia = {};
+  (actividades || []).forEach(a => {
+    if (!a || !a.parcelaId || !a.fecha) return;
+    // Las actividades guardan las horas como "horas" (modal nuevo) u "horas_trab" (admin/registro).
+    const horas = parseFloat(a.horas) || parseFloat(a.horas_trab) || 0;
+    if (horas <= 0) return;
+    // ¿Quién trabajó? Distintos formularios usan distintos campos:
+    //   • trabajadorId directo
+    //   • registradoPor.id (puede ser trabajador, cuadrilla, encargado…)
+    //   • registradoPor.tipo es "planta"/"cuadrilla"/"encargado"/"externo" según el formulario admin
+    //   • registradoPor.rol es "trabajador"/"agronomo"/etc. según los formularios nuevos
+    const trabajadorId = a.trabajadorId || (a.registradoPor && a.registradoPor.id);
+    if (!trabajadorId) return;
+    // Excluir cuando la actividad fue registrada por admin o dueño (sin trabajador real ligado)
+    const rol = a.registradoPor && (a.registradoPor.rol || a.registradoPor.tipo);
+    if (rol === "admin" || rol === "dueno" || rol === "finanzas") return;
+    const k = `${trabajadorId}|${a.fecha}`;
+    if (!porTrabajadorDia[k]) porTrabajadorDia[k] = [];
+    porTrabajadorDia[k].push({ parcelaId: a.parcelaId, horas, actividadId: a.id });
+  });
+
+  // Calcular costo por parcela
+  const costoPorParcela = {};   // parcelaId -> costoTotal
+  const desglosePorParcela = {}; // parcelaId -> [{trabajadorId, fecha, horas, costo}]
+
+  Object.entries(porTrabajadorDia).forEach(([k, acts]) => {
+    const [trabajadorId, fecha] = k.split("|");
+    const trabajador = (trabajadores || []).find(t => t.id === trabajadorId);
+    if (!trabajador) return;
+    const sueldoDiario = parseFloat(trabajador.sueldo_dia) || 0;
+    if (sueldoDiario <= 0) return;
+    const horasTotalesDelDia = acts.reduce((s, a) => s + a.horas, 0);
+    if (horasTotalesDelDia <= 0) return;
+    const costoPorHora = sueldoDiario / horasTotalesDelDia;
+    acts.forEach(a => {
+      const costo = a.horas * costoPorHora;
+      costoPorParcela[a.parcelaId] = (costoPorParcela[a.parcelaId] || 0) + costo;
+      if (!desglosePorParcela[a.parcelaId]) desglosePorParcela[a.parcelaId] = [];
+      desglosePorParcela[a.parcelaId].push({
+        trabajadorId, trabajadorNombre: trabajador.nombre, fecha,
+        horas: a.horas, costoPorHora, costo, actividadId: a.actividadId,
+      });
+    });
+  });
+
+  return { costoPorParcela, desglosePorParcela };
+}
+
+/* ──── Helpers de WhatsApp e indicaciones ──── */
+// Limpia un número de teléfono y lo deja en formato internacional (con 52 al inicio).
+function formatearTelefonoMX(tel) {
+  if (!tel) return "";
+  const limpio = String(tel).replace(/\D/g, "");
+  if (!limpio) return "";
+  if (limpio.startsWith("52") && limpio.length >= 12) return limpio;
+  if (limpio.length === 10) return "52" + limpio;
+  return limpio; // confiar en lo que el usuario puso
+}
+
+// Arma el mensaje de WhatsApp para una indicación y devuelve un URL de wa.me
+function urlWhatsAppIndicacion(data, tarea) {
+  const parcela = data.parcelas.find(p => p.id === tarea.parcelaId);
+  const partes = [];
+  partes.push(`🌿 *INDICACIÓN — Agroselectos P&A*`);
+  partes.push(``);
+  partes.push(`*${tarea.titulo || "Indicación"}*`);
+  if (parcela) partes.push(`📍 Parcela: ${parcela.nombre}${parcela.cultivo ? " · " + parcela.cultivo : ""}`);
+  if (tarea.prioridad) partes.push(`⚡ Prioridad: ${tarea.prioridad}`);
+  if (tarea.detalle) { partes.push(``); partes.push(tarea.detalle); }
+  partes.push(``);
+  partes.push(`Fecha: ${tarea.fecha || ""}`);
+  const mensaje = encodeURIComponent(partes.join("\n"));
+  // Buscar teléfono del destinatario en cualquiera de las colecciones
+  const buscarTel = (id) => {
+    const tipos = ["trabajadores", "encargados", "agronomos", "cuadrillas"];
+    for (const tipo of tipos) {
+      const persona = (data[tipo] || []).find(x => x.id === id);
+      if (persona && persona.telefono) return formatearTelefonoMX(persona.telefono);
+    }
+    return "";
+  };
+  const tel = buscarTel(tarea.asignadoA);
+  return tel ? `https://wa.me/${tel}?text=${mensaje}` : `https://wa.me/?text=${mensaje}`;
+}
+
+// Marca una indicación como completada y crea una actividad real ligada a ella.
+// Si la indicación menciona un insumo, descuenta inventario y carga costo a la parcela.
+function completarIndicacion({ tarea, datosActividad, data, add, upd, setInv, session }) {
+  const actividadId = `act${Date.now()}`;
+  const horasNum = parseFloat(datosActividad.horas) || 0;
+  const cantidadInsumoNum = parseFloat(datosActividad.cantidadInsumo) || 0;
+
+  // Crear la actividad real
+  // Quien hizo el trabajo es el asignado a la indicación (no necesariamente quien la marca como hecha).
+  const trabajadorId = tarea.asignadoA || (session && session.id);
+  const trabajador = (data.trabajadores || []).find(t => t.id === trabajadorId);
+  const actividad = {
+    id: actividadId,
+    fecha: datosActividad.fecha || today(),
+    parcelaId: tarea.parcelaId || datosActividad.parcelaId || "",
+    tipo: tarea.titulo || datosActividad.tipo || "Indicación",
+    horas: horasNum,
+    horas_trab: horasNum, // alias para compatibilidad con campos viejos
+    notas: datosActividad.notas || "",
+    indicacionId: tarea.id,
+    trabajadorId,
+    // registradoPor: quien hizo el trabajo, para que el cálculo de mano de obra le impute a esa persona
+    registradoPor: trabajador
+      ? { rol: "trabajador", id: trabajadorId, nombre: trabajador.nombre }
+      : { rol: session.role, id: session.id, nombre: session.nombre },
+    // marcadoPor: quien apretó el botón "marcar como hecha", para trazabilidad
+    marcadoPor: { rol: session.role, id: session.id, nombre: session.nombre },
+  };
+
+  // Si la indicación tenía insumo asociado y se aplicó cantidad, descontar y cargar costo
+  let costoInsumo = 0;
+  if (tarea.insumoId && cantidadInsumoNum > 0) {
+    const inv = (data.inventario || []).find(i => i.id === tarea.insumoId);
+    if (inv) {
+      const parcela = data.parcelas.find(p => p.id === tarea.parcelaId);
+      setInv(tarea.insumoId, -cantidadInsumoNum, {
+        fecha: actividad.fecha,
+        concepto: `Aplicación ${tarea.titulo || ""}${parcela ? " — " + parcela.nombre : ""}`.trim(),
+        parcelaId: tarea.parcelaId || "",
+        actividadId,
+        indicacionId: tarea.id,
+        registradoPor: { rol: session.role, id: session.id, nombre: session.nombre },
+      });
+      costoInsumo = (inv.costo_unit || 0) * cantidadInsumoNum;
+      actividad.insumoId = tarea.insumoId;
+      actividad.cantidadInsumo = cantidadInsumoNum;
+      actividad.costoInsumo = costoInsumo;
+    }
+  }
+  add("actividades", actividad);
+
+  // Si hubo costo de insumo, generar egreso ligado a la parcela
+  const parcela = data.parcelas.find(p => p.id === tarea.parcelaId);
+  if (costoInsumo > 0 && tarea.parcelaId) {
+    add("egresos", {
+      fecha: actividad.fecha,
+      concepto: `Aplicación ${tarea.titulo || ""} — ${parcela ? parcela.nombre : "parcela"}`.trim(),
+      categoria: "insumos", monto: costoInsumo, parcelaId: tarea.parcelaId,
+      actividadId, indicacionId: tarea.id,
+      registradoPor: { rol: session.role, id: session.id, nombre: session.nombre },
+    });
+  }
+
+  // Marcar la indicación como completada y guardar el id de la actividad
+  upd("tareas", { ...tarea, estado: "completada", actividadId, fechaCompletada: actividad.fecha });
+  return { actividadId, costoInsumo };
 }
 
 /* Almacenamiento persistente. Usa localStorage cuando está disponible
@@ -766,6 +940,87 @@ function nombreSiembra(si) {
   const fechaRef = si.fechaCosechaReal || si.fechaCosechaEstimada || si.fechaSiembra;
   const anio = fechaRef ? fechaRef.slice(0, 4) : "";
   return `${si.cultivoNombre || "Cultivo"} ${anio}`;
+}
+
+// Año "temporada" de una siembra: usa la fecha de cosecha (estimada o real),
+// si no hay, usa la fecha de siembra.
+function anioSiembra(si) {
+  if (!si) return "";
+  const fechaRef = si.fechaCosechaReal || si.fechaCosechaEstimada || si.fechaSiembra || "";
+  return fechaRef.slice(0, 4);
+}
+
+// Agrupa siembras por cultivo + año. Retorna un mapa { "Ajo|2027": [siembra, siembra, ...] }
+function siembrasPorTemporada(siembras) {
+  const out = {};
+  (siembras || []).forEach(s => {
+    const a = anioSiembra(s);
+    const key = `${s.cultivoNombre || "Cultivo"}|${a}`;
+    if (!out[key]) out[key] = { cultivoNombre: s.cultivoNombre, anio: a, siembras: [] };
+    out[key].siembras.push(s);
+  });
+  return out;
+}
+
+// Reporte de una temporada (todas las siembras de un cultivo en un año).
+// Devuelve totales agregados, parcelas únicas, hectáreas, cosecha total, etc.
+function reporteTemporada(data, cultivoNombre, anio) {
+  const semb = (data.siembras || []).filter(s => s.cultivoNombre === cultivoNombre && anioSiembra(s) === anio);
+  const reps = semb.map(s => ({ s, r: reporteSiembra(data, s.id) }));
+  const total = reps.reduce((sum, x) => sum + (x.r.total || 0), 0);
+  const mo = reps.reduce((sum, x) => sum + (x.r.mo || 0), 0);
+  const ins = reps.reduce((sum, x) => sum + (x.r.ins || 0), 0);
+  const maq = reps.reduce((sum, x) => sum + (x.r.maq || 0), 0);
+  const ingresoTotal = reps.reduce((sum, x) => sum + (x.r.ingresoTotal || 0), 0);
+  const presupuesto = reps.reduce((sum, x) => sum + (x.r.presupuesto || 0), 0);
+  const parcelaIds = new Set(semb.map(s => s.parcelaId).filter(Boolean));
+  const parcelas = [...parcelaIds].map(pid => (data.parcelas || []).find(p => p.id === pid)).filter(Boolean);
+  const hectareas = parcelas.reduce((s, p) => s + (p.hectareas || 0), 0);
+  const cosechaTotal = reps.reduce((sum, x) => sum + (x.r.cosechaTotal || 0), 0);
+  const cosechaUnidad = reps.find(x => x.r.cosechaUnidad)?.r.cosechaUnidad || "";
+  const utilidad = ingresoTotal - total;
+  const rendimientoHa = hectareas > 0 ? cosechaTotal / hectareas : 0;
+  const costoPorUnidad = cosechaTotal > 0 ? total / cosechaTotal : 0;
+
+  // Tablas agregadas: combinar porActividad y porInsumo de todas las siembras
+  const porActividad = {};
+  reps.forEach(({ r }) => (r.porActividad || []).forEach(g => {
+    if (!porActividad[g.tipo]) porActividad[g.tipo] = { tipo: g.tipo, total: 0, mo: 0, ins: 0, maq: 0, count: 0 };
+    const x = porActividad[g.tipo];
+    x.total += g.total || 0; x.mo += g.mo || 0; x.ins += g.ins || 0; x.maq += g.maq || 0; x.count += g.count || 0;
+  }));
+  const porInsumo = {};
+  reps.forEach(({ r }) => (r.porInsumo || []).forEach(i => {
+    const key = i.nombre;
+    if (!porInsumo[key]) porInsumo[key] = { nombre: i.nombre, emoji: i.emoji, unidad: i.unidad, cantidad: 0, costo: 0 };
+    porInsumo[key].cantidad += i.cantidad || 0;
+    porInsumo[key].costo += i.costo || 0;
+  }));
+  // Por parcela (resumen breve para que aparezca al final)
+  const porParcela = reps.map(({ s, r }) => {
+    const p = data.parcelas.find(x => x.id === s.parcelaId);
+    return {
+      siembraId: s.id,
+      parcelaNombre: p?.nombre || "—",
+      hectareas: p?.hectareas || 0,
+      costo: r.total || 0,
+      ingreso: r.ingresoTotal || 0,
+      utilidad: (r.ingresoTotal || 0) - (r.total || 0),
+      cosecha: r.cosechaTotal || 0,
+      cosechaUnidad: r.cosechaUnidad || "",
+    };
+  }).sort((a, b) => b.costo - a.costo);
+
+  return {
+    cultivoNombre, anio, siembras: semb, parcelas, reps,
+    total, mo, ins, maq, ingresoTotal, presupuesto, utilidad,
+    hectareas, cosechaTotal, cosechaUnidad, rendimientoHa, costoPorUnidad,
+    porHa: hectareas > 0 ? total / hectareas : 0,
+    porActividad: Object.values(porActividad).sort((a, b) => b.total - a.total),
+    porInsumo: Object.values(porInsumo).sort((a, b) => b.costo - a.costo),
+    porParcela,
+    avancePresupuesto: presupuesto > 0 ? (total / presupuesto) * 100 : 0,
+  };
 }
 
 // Rango de fechas que cubre una siembra (de siembra a cosecha)
@@ -1070,7 +1325,29 @@ function normalizeData(d) {
   if (!Array.isArray(fix.envios_bodega)) fix.envios_bodega = [];
   if (!Array.isArray(fix.externos)) fix.externos = [];
   // Vista contable: solo actividades aprobadas o sin estado (planta/cuadrilla legacy)
-  fix.actividadesContables = (fix.actividades || []).filter(a => !a.estado || a.estado === "aprobado");
+  const actsBase = (fix.actividades || []).filter(a => !a.estado || a.estado === "aprobado");
+  // Calcular el costo de mano de obra en vivo usando la fórmula:
+  // sueldoDiario / horasTotalesDelDia × horasEnEstaActividad
+  // Sin tocar el campo costoMO original — si la actividad ya lo tenía guardado, se respeta.
+  const { desglosePorParcela: __mo } = calcularCostoManoObra(actsBase, fix.trabajadores || []);
+  // Indexar el desglose por actividadId para enriquecer cada actividad
+  const moPorActividad = {};
+  Object.values(__mo).forEach(lista => {
+    lista.forEach(d => {
+      if (d.actividadId) moPorActividad[d.actividadId] = (moPorActividad[d.actividadId] || 0) + d.costo;
+    });
+  });
+  fix.actividadesContables = actsBase.map(a => {
+    const moCalculado = moPorActividad[a.id];
+    if (moCalculado !== undefined) {
+      // Cálculo en vivo siempre tiene prioridad sobre cualquier costoMO guardado.
+      // Recalcula costoTotal restando el costoMO viejo y sumando el nuevo.
+      const moViejo = a.costoMO || 0;
+      const totalAjustado = (a.costoTotal || 0) - moViejo + moCalculado;
+      return { ...a, costoMO: moCalculado, costoTotal: totalAjustado };
+    }
+    return a;
+  });
   return fix;
 }
 
@@ -1138,9 +1415,36 @@ function AppInner() {
     return ni;
   }, [setData, online, queue]);
   const del = useCallback((sec, id) => setData(d => ({ ...d, [sec]: (Array.isArray(d[sec]) ? d[sec] : []).filter(x => x.id !== id) })), [setData]);
-  const setInv = useCallback((id, delta) => setData(d => ({
-    ...d, inventario: (Array.isArray(d.inventario) ? d.inventario : []).map(i => i.id === id ? { ...i, existencia: Math.max(0, i.existencia + delta) } : i)
-  })), [setData]);
+  // setInv: cambia el stock de un insumo. Si recibe `movimiento` (con concepto, parcela, etc),
+  // también registra el movimiento como un renglón en entradas_inv (con cantidad negativa si es salida).
+  const setInv = useCallback((id, delta, movimiento) => setData(d => {
+    const inv = (Array.isArray(d.inventario) ? d.inventario : []);
+    const item = inv.find(i => i.id === id);
+    const next = {
+      ...d,
+      inventario: inv.map(i => i.id === id ? { ...i, existencia: Math.max(0, i.existencia + delta) } : i),
+    };
+    if (movimiento && item) {
+      const prev = Array.isArray(d.entradas_inv) ? d.entradas_inv : [];
+      const reg = {
+        id: `mov${Date.now()}_${id}`,
+        insumoId: id,
+        nombre: item.nombre,
+        unidad: item.unidad,
+        cantidad: delta, // negativo = salida; positivo = entrada
+        fecha: movimiento.fecha || today(),
+        concepto: movimiento.concepto || (delta < 0 ? "Salida" : "Entrada"),
+        parcelaId: movimiento.parcelaId || "",
+        actividadId: movimiento.actividadId || "",
+        indicacionId: movimiento.indicacionId || "",
+        costo_unit: item.costo_unit || 0,
+        costo_total: (item.costo_unit || 0) * delta,
+        registradoPor: movimiento.registradoPor || null,
+      };
+      next.entradas_inv = [...prev, reg];
+    }
+    return next;
+  }), [setData]);
 
   const alertas = genAlertas(data);
 
@@ -1236,7 +1540,7 @@ function AppInner() {
               {page === "resumen" && <ResumenSemanal data={data} onClose={() => setPage("home")} />}
               {page === "respaldo" && <RespaldoDatos data={data} setData={setData} onClose={() => setPage("home")} />}
               {page === "panel-financiero" && <PanelFinanciero data={data} onClose={() => setPage("home")} />}
-              {page === "subir-nube" && <SubirCatalogos data={data} session={session} onClose={() => setPage("home")} />}
+              {page === "subir-nube" && <SubirCatalogos data={data} setData={setData} session={session} onClose={() => setPage("home")} />}
             </>}
             {isEncargado && <>
               {page === "home" && <EncargadoHome data={data} session={session} onNav={setPage} onLogout={cerrarSesion} online={online} />}
@@ -1270,7 +1574,7 @@ function AppInner() {
               {page === "home" && <AgronomoHome data={data} session={session} onNav={setPage} onLogout={cerrarSesion} online={online} />}
               {page === "aplicaciones" && <GestionAplicaciones data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
               {page === "panel-parcelas" && <PanelParcelas data={data} onClose={() => setPage("home")} />}
-              {page === "indicaciones" && <AgronomoIndicaciones data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
+              {page === "indicaciones" && <AgronomoIndicaciones data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
               {page === "compras-insumos" && <AgronomoCompras data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
               {page === "reporte" && <TrabReporte data={data} add={add} session={session} onLogout={cerrarSesion} />}
             </>}
@@ -3268,6 +3572,117 @@ function AdminReportes({ data, navParam, setNavParam }) {
     );
   }
 
+  // ── Detalle de una temporada (cultivo + año, todas las parcelas) ──
+  if (navParam?.tipo === "temporada") {
+    const { cultivo, anio } = navParam.valor;
+    const t = reporteTemporada(data, cultivo, anio);
+    if (!t || t.siembras.length === 0) { setNavParam(null); return null; }
+    const emoji = (data.cultivos || []).find(c => c.nombre === cultivo)?.emoji || "🌱";
+    return (
+      <div>
+        <div className="top-bar">
+          <button className="btn-ghost" onClick={() => setNavParam(null)}>‹</button>
+          <h2>{emoji} {cultivo} {anio}</h2>
+        </div>
+        <div className="section-pad">
+          <div className="stat-row">
+            <div className="stat-card wide">
+              <div className="stat-label">Costo total de la temporada</div>
+              <div className="stat-val" style={{ fontSize: 26 }}>{fmt(t.total)}</div>
+              <div className="stat-sub">{t.parcelas.length} {t.parcelas.length === 1 ? "parcela" : "parcelas"} · {fmtN(t.hectareas)} ha · {t.siembras.length} {t.siembras.length === 1 ? "siembra" : "siembras"}</div>
+            </div>
+          </div>
+          <div className="stat-row">
+            <div className="stat-card"><div className="stat-label">Costo / hectárea</div><div className="stat-val" style={{ fontSize: 17 }}>{fmt(t.porHa)}</div></div>
+            <div className="stat-card"><div className="stat-label">Ingresos</div><div className="stat-val" style={{ fontSize: 17, color: "var(--safe)" }}>{fmt(t.ingresoTotal)}</div></div>
+          </div>
+          <div className="stat-row">
+            <div className="stat-card wide">
+              <div className="stat-label">Utilidad de la temporada</div>
+              <div className="stat-val" style={{ fontSize: 22, color: t.utilidad >= 0 ? "var(--safe)" : "var(--red)" }}>{fmt(t.utilidad)}</div>
+            </div>
+          </div>
+
+          {t.presupuesto > 0 && (
+            <div className="card">
+              <div className="card-title">Presupuesto vs. real</div>
+              <div className="flex-b text-sm" style={{ marginBottom: 3 }}><span className="text-muted">Presupuestado</span><span>{fmt(t.presupuesto)}</span></div>
+              <div className="flex-b text-sm" style={{ marginBottom: 6 }}><span className="text-muted">Gastado</span><span className="font-bold">{fmt(t.total)}</span></div>
+              <div className="progress"><div className={`progress-fill ${t.avancePresupuesto > 100 ? "red" : t.avancePresupuesto > 85 ? "gold" : "green"}`} style={{ width: `${Math.min(100, t.avancePresupuesto)}%` }} /></div>
+              <div className="text-xs mt-2" style={{ color: t.avancePresupuesto > 100 ? "var(--red)" : "var(--muted)" }}>
+                {t.avancePresupuesto > 100
+                  ? `Excedido por ${fmt(t.total - t.presupuesto)} (${Math.round(t.avancePresupuesto - 100)}% sobre presupuesto)`
+                  : `${Math.round(t.avancePresupuesto)}% usado · queda ${fmt(t.presupuesto - t.total)}`}
+              </div>
+            </div>
+          )}
+
+          {t.cosechaTotal > 0 && (
+            <div className="card" style={{ background: "rgba(245,166,35,.05)", border: "1px solid rgba(245,166,35,.2)" }}>
+              <div className="card-title">🌾 Cosecha y rendimiento</div>
+              <div className="flex-b text-sm" style={{ marginBottom: 4 }}><span className="text-muted">Total cosechado</span><span className="font-bold">{fmtN(t.cosechaTotal)} {t.cosechaUnidad}</span></div>
+              <div className="flex-b text-sm" style={{ marginBottom: 4 }}><span className="text-muted">Rendimiento promedio/ha</span><span className="font-bold">{fmtN(Math.round(t.rendimientoHa))} {t.cosechaUnidad}/ha</span></div>
+              <div className="flex-b text-sm"><span className="text-muted">Costo por {t.cosechaUnidad}</span><span className="font-bold text-accent">{fmt(t.costoPorUnidad)}</span></div>
+            </div>
+          )}
+
+          <div className="card">
+            <div className="card-title">Costos por tipo</div>
+            <div className="flex-b text-sm" style={{ marginBottom: 4 }}><span className="text-muted">👷 Mano de obra</span><span className="font-bold">{fmt(t.mo)}</span></div>
+            <div className="flex-b text-sm" style={{ marginBottom: 4 }}><span className="text-muted">🧪 Insumos</span><span className="font-bold">{fmt(t.ins)}</span></div>
+            <div className="flex-b text-sm"><span className="text-muted">🚜 Maquinaria</span><span className="font-bold">{fmt(t.maq)}</span></div>
+          </div>
+
+          <div className="card">
+            <div className="card-title">Desglose por actividad</div>
+            {t.porActividad.length === 0 && <div className="text-muted text-sm">Sin actividades en esta temporada</div>}
+            {t.porActividad.map(g => (
+              <div key={g.tipo} style={{ borderBottom: "1px solid var(--border)", paddingBottom: 10, marginBottom: 10 }}>
+                <div className="flex-b"><span className="font-bold text-sm">{g.tipo}</span><span className="li-val">{fmt(g.total)}</span></div>
+                <div className="text-xs text-muted" style={{ marginTop: 3 }}>{g.count} registro(s) · MO {fmt(g.mo)} · Insumos {fmt(g.ins)} · Maquinaria {fmt(g.maq)}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="card">
+            <div className="card-title">Insumos utilizados en la temporada</div>
+            {t.porInsumo.length === 0 && <div className="text-muted text-sm">Sin insumos registrados</div>}
+            {t.porInsumo.map(i => (
+              <div key={i.nombre} className="list-item">
+                <div className="li-icon">{i.emoji || "📦"}</div>
+                <div className="li-body"><div className="li-title">{i.nombre}</div><div className="li-sub">{fmtN(i.cantidad)} {i.unidad}</div></div>
+                <div className="li-right"><div className="li-val">{fmt(i.costo)}</div></div>
+              </div>
+            ))}
+          </div>
+
+          {t.porParcela.length > 1 && (
+            <div className="card">
+              <div className="card-title">Por parcela</div>
+              <div className="text-xs text-muted mb-2">Si quieres ver el detalle individual de una parcela, toca su nombre.</div>
+              {t.porParcela.map(pp => (
+                <div key={pp.siembraId} className="list-item" style={{ cursor: "pointer" }}
+                     onClick={() => setNavParam({ tipo: "siembra", valor: pp.siembraId })}>
+                  <div className="li-body">
+                    <div className="li-title">{pp.parcelaNombre}</div>
+                    <div className="li-sub">
+                      {pp.hectareas > 0 ? `${fmtN(pp.hectareas)} ha` : ""}
+                      {pp.cosecha > 0 ? ` · ${fmtN(pp.cosecha)} ${pp.cosechaUnidad}` : ""}
+                    </div>
+                  </div>
+                  <div className="li-right">
+                    <div className="li-val">{fmt(pp.costo)}</div>
+                    <div className="li-val-sub" style={{ color: pp.utilidad >= 0 ? "var(--safe)" : "var(--red)" }}>{fmt(pp.utilidad)} ›</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   // ── Vista general: por parcela y por cultivo ──
   // Para cada parcela: lista de siembras, con la activa marcada
   const cultivosUnicos = [...new Set((data.siembras || []).map(s => s.cultivoNombre))].filter(Boolean);
@@ -3323,30 +3738,39 @@ function AdminReportes({ data, navParam, setNavParam }) {
         )}
         {vista === "cultivos" && (
           <>
-            <div className="text-xs text-muted mb-3" style={{ paddingLeft: 4 }}>Todas las siembras agrupadas por cultivo.</div>
+            <div className="text-xs text-muted mb-3" style={{ paddingLeft: 4 }}>Resultados consolidados por cultivo y año, sumando todas las parcelas donde se sembró. Toca una temporada para ver el detalle completo.</div>
             {cultivosUnicos.length === 0 && <div className="text-muted text-sm" style={{ textAlign: "center", padding: "32px 0" }}>Sin siembras registradas</div>}
             {cultivosUnicos.map(cul => {
-              const semb = (data.siembras || []).filter(s => s.cultivoNombre === cul)
-                .sort((a, b) => (b.fechaSiembra || "").localeCompare(a.fechaSiembra || ""));
-              const totalCul = semb.reduce((sum, s) => sum + reporteSiembra(data, s.id).total, 0);
+              // Agrupar las siembras de este cultivo por año
+              const aniosDelCultivo = [...new Set((data.siembras || []).filter(s => s.cultivoNombre === cul).map(anioSiembra))]
+                .filter(Boolean).sort((a, b) => b.localeCompare(a));
+              if (aniosDelCultivo.length === 0) return null;
+              const totalCul = aniosDelCultivo.reduce((sum, a) => sum + reporteTemporada(data, cul, a).total, 0);
               return (
                 <div key={cul} className="card">
                   <div className="flex-b mb-2">
                     <div className="font-bold font-syne" style={{ fontSize: 15 }}>{(data.cultivos || []).find(c => c.nombre === cul)?.emoji || "🌱"} {cul}</div>
                     <span className="text-accent font-bold">{fmt(totalCul)}</span>
                   </div>
-                  {semb.map(s => {
-                    const r = reporteSiembra(data, s.id);
-                    const p = data.parcelas.find(x => x.id === s.parcelaId);
+                  {aniosDelCultivo.map(anio => {
+                    const t = reporteTemporada(data, cul, anio);
                     return (
-                      <div key={s.id} className="list-item" style={{ cursor: "pointer" }} onClick={() => setNavParam({ tipo: "siembra", valor: s.id })}>
+                      <div key={anio} className="list-item" style={{ cursor: "pointer" }}
+                           onClick={() => setNavParam({ tipo: "temporada", valor: { cultivo: cul, anio } })}>
                         <div className="li-body">
-                          <div className="li-title">{nombreSiembra(s)}</div>
-                          <div className="li-sub">{p?.nombre} · {s.estado}</div>
+                          <div className="li-title">{cul} {anio}</div>
+                          <div className="li-sub">
+                            {t.parcelas.length} {t.parcelas.length === 1 ? "parcela" : "parcelas"}
+                            {t.hectareas > 0 ? ` · ${fmtN(t.hectareas)} ha` : ""}
+                            {t.cosechaTotal > 0 ? ` · ${fmtN(t.cosechaTotal)} ${t.cosechaUnidad}` : ""}
+                          </div>
+                          <div className="li-sub" style={{ marginTop: 2 }}>
+                            Ingresos {fmt(t.ingresoTotal)} · Costos {fmt(t.total)}
+                          </div>
                         </div>
                         <div className="li-right">
-                          <div className="li-val">{fmt(r.total)}</div>
-                          {r.cosechaTotal > 0 && <div className="li-val-sub">{fmtN(r.cosechaTotal)} {r.cosechaUnidad}</div>}
+                          <div className="li-val" style={{ color: t.utilidad >= 0 ? "var(--safe)" : "var(--red)" }}>{fmt(t.utilidad)}</div>
+                          <div className="li-val-sub">utilidad ›</div>
                         </div>
                       </div>
                     );
@@ -3358,45 +3782,46 @@ function AdminReportes({ data, navParam, setNavParam }) {
         )}
         {vista === "comparar" && (
           <>
-            <div className="text-xs text-muted mb-3" style={{ paddingLeft: 4 }}>Compara los ciclos de un mismo cultivo entre sí — costo, rendimiento y utilidad.</div>
+            <div className="text-xs text-muted mb-3" style={{ paddingLeft: 4 }}>Compara las temporadas (años) de un mismo cultivo — costo, rendimiento y utilidad del ciclo completo.</div>
             {cultivosUnicos.length === 0 && <div className="text-muted text-sm" style={{ textAlign: "center", padding: "32px 0" }}>Sin siembras para comparar</div>}
             {cultivosUnicos.map(cul => {
-              const semb = (data.siembras || []).filter(s => s.cultivoNombre === cul)
-                .sort((a, b) => (a.fechaSiembra || "").localeCompare(b.fechaSiembra || ""));
-              if (semb.length < 2) return null;
-              const reps = semb.map(s => ({ s, r: reporteSiembra(data, s.id) }));
-              const maxCosto = Math.max(...reps.map(x => x.r.total), 1);
-              const maxRend = Math.max(...reps.map(x => x.r.rendimientoHa), 1);
+              const aniosDelCultivo = [...new Set((data.siembras || []).filter(s => s.cultivoNombre === cul).map(anioSiembra))]
+                .filter(Boolean).sort((a, b) => a.localeCompare(b)); // cronológico para comparar evolución
+              if (aniosDelCultivo.length < 2) return null;
+              const temporadas = aniosDelCultivo.map(a => reporteTemporada(data, cul, a));
+              const maxCosto = Math.max(...temporadas.map(t => t.total), 1);
+              const maxRend = Math.max(...temporadas.map(t => t.rendimientoHa), 1);
               return (
                 <div key={cul} className="card">
                   <div className="font-bold font-syne mb-3" style={{ fontSize: 15 }}>{(data.cultivos || []).find(c => c.nombre === cul)?.emoji || "🌱"} {cul}</div>
-                  {reps.map(({ s, r }) => (
-                    <div key={s.id} style={{ borderBottom: "1px solid var(--border)", paddingBottom: 12, marginBottom: 12, cursor: "pointer" }} onClick={() => setNavParam({ tipo: "siembra", valor: s.id })}>
+                  {temporadas.map(t => (
+                    <div key={t.anio} style={{ borderBottom: "1px solid var(--border)", paddingBottom: 12, marginBottom: 12, cursor: "pointer" }}
+                         onClick={() => setNavParam({ tipo: "temporada", valor: { cultivo: cul, anio: t.anio } })}>
                       <div className="flex-b mb-2">
-                        <span className="font-bold text-sm">{nombreSiembra(s)}</span>
-                        <span className="text-xs text-muted">{s.estado}</span>
+                        <span className="font-bold text-sm">{cul} {t.anio} ›</span>
+                        <span className="text-xs text-muted">{t.parcelas.length} {t.parcelas.length === 1 ? "parcela" : "parcelas"} · {fmtN(t.hectareas)} ha</span>
                       </div>
-                      <div className="flex-b text-xs mb-1"><span className="text-muted">Costo</span><span>{fmt(r.total)}</span></div>
-                      <div className="progress mb-2"><div className="progress-fill green" style={{ width: `${(r.total / maxCosto) * 100}%` }} /></div>
-                      <div className="flex-b text-xs mb-1"><span className="text-muted">Rendimiento</span><span>{fmtN(Math.round(r.rendimientoHa))} {r.cosechaUnidad}/ha</span></div>
-                      <div className="progress mb-2"><div className="progress-fill" style={{ width: `${(r.rendimientoHa / maxRend) * 100}%`, background: "var(--gold)" }} /></div>
+                      <div className="flex-b text-xs mb-1"><span className="text-muted">Costo total</span><span>{fmt(t.total)}</span></div>
+                      <div className="progress mb-2"><div className="progress-fill green" style={{ width: `${(t.total / maxCosto) * 100}%` }} /></div>
+                      <div className="flex-b text-xs mb-1"><span className="text-muted">Rendimiento</span><span>{t.rendimientoHa > 0 ? `${fmtN(Math.round(t.rendimientoHa))} ${t.cosechaUnidad}/ha` : "—"}</span></div>
+                      <div className="progress mb-2"><div className="progress-fill" style={{ width: `${(t.rendimientoHa / maxRend) * 100}%`, background: "var(--gold)" }} /></div>
                       <div className="flex-b text-xs">
-                        <span className="text-muted">Costo/{r.cosechaUnidad}: <span className="font-bold text-accent">{r.cosechaTotal > 0 ? fmt(r.costoPorUnidad) : "—"}</span></span>
-                        <span className="font-bold" style={{ color: r.utilidad >= 0 ? "var(--safe)" : "var(--red)" }}>Utilidad {fmt(r.utilidad)}</span>
+                        <span className="text-muted">Costo/{t.cosechaUnidad || "u"}: <span className="font-bold text-accent">{t.cosechaTotal > 0 ? fmt(t.costoPorUnidad) : "—"}</span></span>
+                        <span className="font-bold" style={{ color: t.utilidad >= 0 ? "var(--safe)" : "var(--red)" }}>Utilidad {fmt(t.utilidad)}</span>
                       </div>
                     </div>
                   ))}
                   {(() => {
-                    const conRend = reps.filter(x => x.r.rendimientoHa > 0);
+                    const conRend = temporadas.filter(t => t.rendimientoHa > 0);
                     if (conRend.length < 2) return null;
-                    const mejor = conRend.reduce((a, b) => b.r.rendimientoHa > a.r.rendimientoHa ? b : a);
-                    const conCosecha = reps.filter(x => x.r.cosechaTotal > 0);
-                    const barato = conCosecha.length >= 2 ? conCosecha.reduce((a, b) => b.r.costoPorUnidad < a.r.costoPorUnidad ? b : a) : null;
+                    const mejor = conRend.reduce((a, b) => b.rendimientoHa > a.rendimientoHa ? b : a);
+                    const conCosecha = temporadas.filter(t => t.cosechaTotal > 0);
+                    const barato = conCosecha.length >= 2 ? conCosecha.reduce((a, b) => b.costoPorUnidad < a.costoPorUnidad ? b : a) : null;
                     return (
                       <div className="alert alert-blue" style={{ marginTop: 4 }}>
                         <span className="alert-icon">📊</span>
                         <div className="alert-body">
-                          <div className="alert-desc">Mejor rendimiento: {nombreSiembra(mejor.s)}{barato ? ` · Más barato por unidad: ${nombreSiembra(barato.s)}` : ""}</div>
+                          <div className="alert-desc">Mejor rendimiento: {cul} {mejor.anio}{barato ? ` · Más barato por unidad: ${cul} ${barato.anio}` : ""}</div>
                         </div>
                       </div>
                     );
@@ -3404,8 +3829,11 @@ function AdminReportes({ data, navParam, setNavParam }) {
                 </div>
               );
             })}
-            {cultivosUnicos.length > 0 && cultivosUnicos.every(cul => (data.siembras || []).filter(s => s.cultivoNombre === cul).length < 2) && (
-              <div className="text-muted text-sm" style={{ textAlign: "center", padding: "20px 0" }}>Necesitas al menos 2 ciclos del mismo cultivo para comparar. Registra más siembras en el Calendario.</div>
+            {cultivosUnicos.length > 0 && cultivosUnicos.every(cul => {
+              const anios = new Set((data.siembras || []).filter(s => s.cultivoNombre === cul).map(anioSiembra));
+              return anios.size < 2;
+            }) && (
+              <div className="text-muted text-sm" style={{ textAlign: "center", padding: "20px 0" }}>Necesitas al menos 2 años del mismo cultivo para comparar temporadas. Por ejemplo, sembrar Ajo en 2026 y 2027.</div>
             )}
           </>
         )}
@@ -7211,10 +7639,11 @@ function GestionAplicaciones({ data, add, upd, del, setInv, session, onClose }) 
 }
 
 /* ──── Agrónomo: indicaciones a regadores y droneros ──── */
-function AgronomoIndicaciones({ data, add, upd, del, session, onClose }) {
+function AgronomoIndicaciones({ data, add, upd, del, setInv, session, onClose }) {
   const [showForm, setShowForm] = useState(false);
   const [editItem, setEditItem] = useState(null);
-  const F0 = { asignadoA: "", parcelaId: "", titulo: "", detalle: "", prioridad: "media" };
+  const [tareaACompletar, setTareaACompletar] = useState(null);
+  const F0 = { asignadoA: "", parcelaId: "", titulo: "", detalle: "", prioridad: "media", insumoId: "", cantidadInsumo: "" };
   const [form, setForm] = useState(F0);
 
   // Solo regadores y droneros (por categoría)
@@ -7262,6 +7691,17 @@ function AgronomoIndicaciones({ data, add, upd, del, session, onClose }) {
             </div>
             <div className="form-group"><label className="form-label">Indicación</label><input className="inp" placeholder="Ej: Aplicar fertirriego en bloque norte" value={form.titulo} onChange={e => setForm(f => ({ ...f, titulo: e.target.value }))} /></div>
             <div className="form-group"><label className="form-label">Detalle</label><textarea className="inp" placeholder="Dosis, productos, horario, indicaciones técnicas..." value={form.detalle} onChange={e => setForm(f => ({ ...f, detalle: e.target.value }))} /></div>
+            <div className="form-group">
+              <label className="form-label">Insumo a aplicar (opcional)</label>
+              <select className="inp" value={form.insumoId} onChange={e => setForm(f => ({ ...f, insumoId: e.target.value }))}>
+                <option value="">Sin insumo específico</option>
+                {(data.inventario || []).map(i => <option key={i.id} value={i.id}>{i.emoji || "🧪"} {i.nombre} ({fmtN(i.existencia || 0)} {i.unidad || ""})</option>)}
+              </select>
+              <div className="text-xs text-muted mt-1">Si eliges un insumo, al marcarse como hecha se descontará del inventario y el costo se cargará a la parcela.</div>
+            </div>
+            {form.insumoId && (
+              <div className="form-group"><label className="form-label">Cantidad sugerida</label><input type="number" step="0.01" className="inp" placeholder="Ej: 50" value={form.cantidadInsumo} onChange={e => setForm(f => ({ ...f, cantidadInsumo: e.target.value }))} /></div>
+            )}
             <div className="form-group"><label className="form-label">Prioridad</label>
               <select className="inp" value={form.prioridad} onChange={e => setForm(f => ({ ...f, prioridad: e.target.value }))}>
                 <option value="alta">Alta</option><option value="media">Media</option><option value="baja">Baja</option>
@@ -7274,6 +7714,7 @@ function AgronomoIndicaciones({ data, add, upd, del, session, onClose }) {
         {misIndicaciones.map(t => {
           const quien = data.trabajadores.find(x => x.id === t.asignadoA);
           const p = data.parcelas.find(x => x.id === t.parcelaId);
+          const tieneWA = !!(quien && quien.telefono);
           return (
             <div key={t.id} className="card">
               <div className="flex-b mb-1">
@@ -7282,8 +7723,17 @@ function AgronomoIndicaciones({ data, add, upd, del, session, onClose }) {
               </div>
               <div className="text-sm text-muted">{quien?.nombre || "—"}{p ? ` · ${p.nombre}` : ""} · {t.fecha}</div>
               {t.detalle && <div className="text-sm" style={{ marginTop: 6 }}>{t.detalle}</div>}
+              {t.insumoId && (() => {
+                const ins = (data.inventario || []).find(i => i.id === t.insumoId);
+                return ins ? <div className="text-xs mt-1" style={{ color: "var(--accent)" }}>🧪 {ins.nombre}{t.cantidadInsumo ? ` — ${t.cantidadInsumo} ${ins.unidad || ""}` : ""}</div> : null;
+              })()}
               <div className="gap-row mt-2">
-                {t.estado !== "completada" && <button className="btn btn-outline btn-sm" style={{ flex: 1 }} onClick={() => upd("tareas", { ...t, estado: "completada" })}>Marcar hecha</button>}
+                {t.estado !== "completada" && (
+                  <button className="btn btn-accent btn-sm" style={{ flex: 1 }} onClick={() => setTareaACompletar(t)}>✓ Marcar hecha</button>
+                )}
+                {t.estado !== "completada" && (
+                  <a className="btn btn-outline btn-sm" style={{ flex: "0 0 auto", textDecoration: "none" }} href={urlWhatsAppIndicacion(data, t)} target="_blank" rel="noopener noreferrer">📲{tieneWA ? "" : " elegir"}</a>
+                )}
                 <button className="btn btn-outline btn-sm" style={{ flex: "0 0 auto" }} onClick={() => setEditItem(t)}>✏️</button>
                 <button className="btn btn-danger btn-sm" style={{ flex: "0 0 auto" }} onClick={() => del("tareas", t.id)}>🗑</button>
               </div>
@@ -7296,6 +7746,12 @@ function AgronomoIndicaciones({ data, add, upd, del, session, onClose }) {
           seccion="tareas" registro={editItem} titulo={editItem.titulo} upd={upd} del={del}
           campos={[["titulo", "Indicación", "text"], ["detalle", "Detalle", "textarea"], ["prioridad", "Prioridad", "select", [{ v: "alta", l: "Alta" }, { v: "media", l: "Media" }, { v: "baja", l: "Baja" }]], ["estado", "Estado", "select", [{ v: "pendiente", l: "Pendiente" }, { v: "completada", l: "Completada" }]], ["fecha", "Fecha", "date"]]}
           onClose={() => setEditItem(null)}
+        />
+      )}
+      {tareaACompletar && (
+        <CompletarIndicacionModal
+          tarea={tareaACompletar} data={data} add={add} upd={upd} setInv={setInv} session={session}
+          onClose={() => setTareaACompletar(null)}
         />
       )}
     </div>
@@ -7942,8 +8398,8 @@ function GestionDeudas({ data, add, upd, del, session, onClose }) {
 /* ════════════ MIGRACIÓN INICIAL A LA NUBE ════════════ */
 
 /* ════════════ MIGRACIÓN INICIAL DESDE EXCEL ════════════ */
-/* Permite descargar una plantilla, llenarla, y subirla a Supabase. */
-function SubirCatalogos({ data, session, onClose }) {
+/* Permite descargar una plantilla, llenarla, y subirla a Supabase + dejarla en el navegador. */
+function SubirCatalogos({ data, setData, session, onClose }) {
   const [paso, setPaso] = useState("inicio"); // inicio | revision | subiendo | hecho | error
   const [archivoLeido, setArchivoLeido] = useState(null);
   const [colecciones, setColecciones] = useState(null);
@@ -7976,12 +8432,26 @@ function SubirCatalogos({ data, session, onClose }) {
     }
   };
 
+  // Mezcla los catálogos del Excel con los datos locales del navegador.
+  // Por cada catálogo que vino lleno en el Excel: reemplaza el catálogo local.
+  // Los catálogos que no vinieron en el Excel se quedan como estaban.
+  const aplicarLocalmente = (cols) => {
+    setData(prev => {
+      const next = { ...prev };
+      CATALOGOS.forEach(tabla => {
+        const registros = cols[tabla] || [];
+        if (registros.length > 0) next[tabla] = registros;
+      });
+      return next;
+    });
+  };
+
   const subir = async () => {
     if (!colecciones) return;
     setPaso("subiendo");
     try {
       const r = {};
-      // Subir cada catálogo (excepto cuentas, esas van por SQL aparte)
+      // 1. Subir a Supabase
       for (const tabla of CATALOGOS) {
         const registros = colecciones[tabla] || [];
         if (registros.length === 0) { r[tabla] = { ok: true, cantidad: 0, omitido: true }; continue; }
@@ -7992,6 +8462,10 @@ function SubirCatalogos({ data, session, onClose }) {
           r[tabla] = { ok: false, error: e.message };
         }
       }
+      // 2. Mezclar también localmente para que la app los vea de inmediato
+      try { aplicarLocalmente(colecciones); }
+      catch (e) { console.warn("No se pudo aplicar localmente:", e); }
+
       setResumen(r);
       const huboError = Object.values(r).some(x => x.ok === false);
       setPaso(huboError ? "error" : "hecho");
@@ -8028,7 +8502,7 @@ function SubirCatalogos({ data, session, onClose }) {
               <div className="text-sm" style={{ lineHeight: 1.6 }}>
                 1. Descarga la plantilla de Excel.<br/>
                 2. Llénala con los datos reales del rancho (cuentas, parcelas, trabajadores, etc.).<br/>
-                3. Súbela aquí y la app procesará todo automáticamente.
+                3. Súbela aquí. Los datos quedan guardados en la nube <strong>y disponibles en la app de inmediato</strong>.
               </div>
             </div>
 
@@ -8141,7 +8615,7 @@ function SubirCatalogos({ data, session, onClose }) {
               <span className="alert-icon">✅</span>
               <div className="alert-body">
                 <div className="alert-title">¡Listo!</div>
-                <div className="alert-desc">Los catálogos se subieron correctamente.</div>
+                <div className="alert-desc">Los catálogos se subieron a la nube y ya están disponibles en la app para usarlos.</div>
               </div>
             </div>
             {cuentaSi(colecciones.cuentas) > 0 && (
@@ -8194,6 +8668,100 @@ function SubirCatalogos({ data, session, onClose }) {
           </>
         )}
 
+      </div>
+    </div>
+  );
+}
+
+/* ════════════ MODAL: COMPLETAR INDICACIÓN ════════════ */
+/* Se abre cuando alguien marca una indicación como hecha.
+   Pide horas, cantidad real aplicada (si era insumo), notas.
+   Al guardar: crea la actividad, descuenta inventario, carga costo a parcela. */
+function CompletarIndicacionModal({ tarea, data, add, upd, setInv, session, onClose, onCompletado }) {
+  const tieneInsumo = !!tarea.insumoId;
+  const insumo = tieneInsumo ? (data.inventario || []).find(i => i.id === tarea.insumoId) : null;
+  const [fecha, setFecha] = useState(today());
+  const [horas, setHoras] = useState("");
+  const [cantidadInsumo, setCantidadInsumo] = useState(tarea.cantidadInsumo || "");
+  const [notas, setNotas] = useState("");
+  const [guardando, setGuardando] = useState(false);
+
+  const parcela = data.parcelas.find(p => p.id === tarea.parcelaId);
+  const cantidadNum = parseFloat(cantidadInsumo) || 0;
+  const costoEstimado = tieneInsumo && insumo ? (insumo.costo_unit || 0) * cantidadNum : 0;
+
+  const guardar = () => {
+    if (tieneInsumo && cantidadNum <= 0) {
+      alert("Indica cuánto insumo se aplicó realmente.");
+      return;
+    }
+    if (tieneInsumo && insumo && cantidadNum > (insumo.existencia || 0)) {
+      if (!confirm(`Solo hay ${insumo.existencia} ${insumo.unidad || ""} en inventario y vas a descontar ${cantidadNum}. ¿Continuar de todas formas?`)) return;
+    }
+    setGuardando(true);
+    try {
+      const r = completarIndicacion({
+        tarea, data, add, upd, setInv, session,
+        datosActividad: { fecha, horas, notas, cantidadInsumo: cantidadNum },
+      });
+      if (onCompletado) onCompletado(r);
+      onClose();
+    } catch (e) {
+      alert("No se pudo registrar: " + (e.message || e));
+      setGuardando(false);
+    }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-sheet" onClick={e => e.stopPropagation()}>
+        <div className="flex-b mb-3">
+          <h3 style={{ margin: 0, fontSize: 18 }}>Completar indicación</h3>
+          <button className="btn-ghost" onClick={onClose} style={{ fontSize: 20 }}>✕</button>
+        </div>
+        <div className="card" style={{ background: "rgba(126,200,50,.06)", border: "1px solid rgba(126,200,50,.2)" }}>
+          <div className="font-bold">{tarea.titulo}</div>
+          {parcela && <div className="text-sm text-muted mt-1">📍 {parcela.nombre}{parcela.cultivo ? " · " + parcela.cultivo : ""}</div>}
+          {tarea.detalle && <div className="text-sm mt-2">{tarea.detalle}</div>}
+        </div>
+        <div className="text-xs text-muted mb-3" style={{ marginTop: 12 }}>
+          Esto va a crear el registro de la actividad real con sus horas y, si aplica, descontar el insumo del inventario y cargar el costo a la parcela.
+        </div>
+        <div className="form-group">
+          <label className="form-label">¿Cuándo se hizo?</label>
+          <input type="date" className="inp" value={fecha} onChange={e => setFecha(e.target.value)} max={today()} />
+        </div>
+        <div className="form-group">
+          <label className="form-label">Horas trabajadas (opcional)</label>
+          <input type="number" step="0.25" className="inp" placeholder="Ej: 3" value={horas} onChange={e => setHoras(e.target.value)} />
+        </div>
+        {tieneInsumo && insumo && (
+          <>
+            <div className="form-group">
+              <label className="form-label">Cantidad de {insumo.nombre} aplicada ({insumo.unidad || "unid"})</label>
+              <input type="number" step="0.01" className="inp" placeholder="Ej: 50" value={cantidadInsumo} onChange={e => setCantidadInsumo(e.target.value)} />
+              <div className="text-xs text-muted mt-1">Inventario actual: {fmtN(insumo.existencia || 0)} {insumo.unidad || ""}</div>
+            </div>
+            {cantidadNum > 0 && (
+              <div className="alert alert-blue mb-3">
+                <span className="alert-icon">💰</span>
+                <div className="alert-body">
+                  <div className="alert-desc">Esto descontará {fmtN(cantidadNum)} {insumo.unidad || ""} del inventario y cargará {fmt(costoEstimado)} a la parcela.</div>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+        <div className="form-group">
+          <label className="form-label">Observaciones (opcional)</label>
+          <textarea className="inp" placeholder="Notas del trabajo realizado..." value={notas} onChange={e => setNotas(e.target.value)} />
+        </div>
+        <div className="gap-row" style={{ marginTop: 16 }}>
+          <button className="btn btn-outline" style={{ flex: 1 }} onClick={onClose} disabled={guardando}>Cancelar</button>
+          <button className="btn btn-accent" style={{ flex: 1.5 }} onClick={guardar} disabled={guardando}>
+            {guardando ? "Guardando..." : "✓ Marcar como hecha"}
+          </button>
+        </div>
       </div>
     </div>
   );
