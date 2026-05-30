@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, Component } from "react";
-import { supabase, supabaseListo } from "./supabase";
-import { migrarCatalogos, leerTodo, CATALOGOS, subirColeccion } from "./dataApi";
+import { supabase, supabaseListo, cuentaTecnicaListo, iniciarConCuentaTecnica } from "./supabase";
+import { migrarCatalogos, leerTodo, CATALOGOS, subirColeccion, guardarRegistro, borrarRegistro } from "./dataApi";
 import { generarPlantilla, leerExcel, excelAColecciones, validar, generarSQLCuentas, HOJAS } from "./excelLoader";
 
 /* ════════════ LOGO ════════════ */
@@ -1391,6 +1391,35 @@ function AppInner() {
     setSession(null);
   }, [session]);
 
+  // Sincronización inicial: cuando hay sesión real, leer datos de Supabase y refrescar el navegador.
+  // Supabase es la fuente de verdad. Si la red falla, se queda con lo que tenga local.
+  const [sincronizando, setSincronizando] = useState(false);
+  useEffect(() => {
+    if (!supabaseListo || !session) return;
+    let activo = true;
+    (async () => {
+      setSincronizando(true);
+      try {
+        const datosNube = await leerTodo();
+        if (!activo) return;
+        // Mezclar: por cada tabla que vino de la nube con datos, reemplaza la local.
+        // Las tablas vacías en la nube NO sobrescriben las locales (precaución contra borrar todo accidentalmente).
+        setData(prev => {
+          const next = { ...prev };
+          Object.entries(datosNube || {}).forEach(([tabla, filas]) => {
+            if (Array.isArray(filas) && filas.length > 0) next[tabla] = filas;
+          });
+          return next;
+        });
+      } catch (e) {
+        console.warn("Sincronización con nube falló:", e?.message);
+      } finally {
+        if (activo) setSincronizando(false);
+      }
+    })();
+    return () => { activo = false; };
+  }, [session?.id, session?.cuenta]);
+
   const setPage = useCallback(p => { setPageRaw(p); setNavParam(null); }, []);
 
   useEffect(() => {
@@ -1404,47 +1433,94 @@ function AppInner() {
     } catch {}
   }, []);
 
-  const upd = useCallback((sec, item) => setData(d => {
-    const col = Array.isArray(d[sec]) ? d[sec] : [];
-    return { ...d, [sec]: col.some(x => x.id === item.id) ? col.map(x => x.id === item.id ? item : x) : [...col, item] };
-  }), [setData]);
+  // Función auxiliar: replica un cambio a Supabase si hay sesión válida.
+  // No bloquea — la app sigue funcionando aunque Supabase tarde o falle.
+  const replicarANube = useCallback((operacion, sec, payload) => {
+    if (!supabaseListo) return;
+    // Solo replicar si la tabla existe en Supabase (es uno de los catálogos/movimientos definidos).
+    const TABLAS_NUBE = [
+      "ranchos","parcelas","cultivos","siembras","trabajadores",
+      "encargados","agronomos","cuadrillas","externos","maquinaria",
+      "inventario","actividades","cosechas","aplicaciones","ingresos",
+      "egresos","compras","entradas_inv","tareas","bonificaciones",
+      "incidencias","prestamos","cajachica","creditos","proveedores",
+      "ciclos","asistencia","envios_bodega",
+    ];
+    if (!TABLAS_NUBE.includes(sec)) return;
+    (async () => {
+      try {
+        if (operacion === "del") await borrarRegistro(sec, payload);
+        else await guardarRegistro(sec, payload);
+      } catch (e) {
+        // Si falla, no rompemos la app. Por ahora solo avisamos en consola.
+        // En la Etapa 3 esto irá a una cola de sincronización offline.
+        console.warn(`No se pudo replicar ${operacion} en ${sec}:`, e?.message);
+      }
+    })();
+  }, []);
+
+  const upd = useCallback((sec, item) => {
+    setData(d => {
+      const col = Array.isArray(d[sec]) ? d[sec] : [];
+      return { ...d, [sec]: col.some(x => x.id === item.id) ? col.map(x => x.id === item.id ? item : x) : [...col, item] };
+    });
+    replicarANube("upd", sec, item);
+  }, [setData, replicarANube]);
+
   const add = useCallback((sec, item) => {
     const ni = { ...item, id: item.id || `${sec[0]}${Date.now()}${Math.floor(Math.random() * 1000)}` };
     setData(d => ({ ...d, [sec]: [...(Array.isArray(d[sec]) ? d[sec] : []), ni] }));
     if (!online) queue({ action: "add", sec, item: ni });
+    replicarANube("add", sec, ni);
     return ni;
-  }, [setData, online, queue]);
-  const del = useCallback((sec, id) => setData(d => ({ ...d, [sec]: (Array.isArray(d[sec]) ? d[sec] : []).filter(x => x.id !== id) })), [setData]);
+  }, [setData, online, queue, replicarANube]);
+
+  const del = useCallback((sec, id) => {
+    setData(d => ({ ...d, [sec]: (Array.isArray(d[sec]) ? d[sec] : []).filter(x => x.id !== id) }));
+    replicarANube("del", sec, id);
+  }, [setData, replicarANube]);
+
   // setInv: cambia el stock de un insumo. Si recibe `movimiento` (con concepto, parcela, etc),
   // también registra el movimiento como un renglón en entradas_inv (con cantidad negativa si es salida).
-  const setInv = useCallback((id, delta, movimiento) => setData(d => {
-    const inv = (Array.isArray(d.inventario) ? d.inventario : []);
-    const item = inv.find(i => i.id === id);
-    const next = {
-      ...d,
-      inventario: inv.map(i => i.id === id ? { ...i, existencia: Math.max(0, i.existencia + delta) } : i),
-    };
-    if (movimiento && item) {
-      const prev = Array.isArray(d.entradas_inv) ? d.entradas_inv : [];
-      const reg = {
-        id: `mov${Date.now()}_${id}`,
-        insumoId: id,
-        nombre: item.nombre,
-        unidad: item.unidad,
-        cantidad: delta, // negativo = salida; positivo = entrada
-        fecha: movimiento.fecha || today(),
-        concepto: movimiento.concepto || (delta < 0 ? "Salida" : "Entrada"),
-        parcelaId: movimiento.parcelaId || "",
-        actividadId: movimiento.actividadId || "",
-        indicacionId: movimiento.indicacionId || "",
-        costo_unit: item.costo_unit || 0,
-        costo_total: (item.costo_unit || 0) * delta,
-        registradoPor: movimiento.registradoPor || null,
+  const setInv = useCallback((id, delta, movimiento) => {
+    let inventarioActualizado = null;
+    let movimientoAgregado = null;
+    setData(d => {
+      const inv = (Array.isArray(d.inventario) ? d.inventario : []);
+      const item = inv.find(i => i.id === id);
+      if (!item) return d;
+      const itemNuevo = { ...item, existencia: Math.max(0, item.existencia + delta) };
+      inventarioActualizado = itemNuevo;
+      const next = {
+        ...d,
+        inventario: inv.map(i => i.id === id ? itemNuevo : i),
       };
-      next.entradas_inv = [...prev, reg];
-    }
-    return next;
-  }), [setData]);
+      if (movimiento) {
+        const prev = Array.isArray(d.entradas_inv) ? d.entradas_inv : [];
+        const reg = {
+          id: `mov${Date.now()}_${id}`,
+          insumoId: id,
+          nombre: item.nombre,
+          unidad: item.unidad,
+          cantidad: delta,
+          fecha: movimiento.fecha || today(),
+          concepto: movimiento.concepto || (delta < 0 ? "Salida" : "Entrada"),
+          parcelaId: movimiento.parcelaId || "",
+          actividadId: movimiento.actividadId || "",
+          indicacionId: movimiento.indicacionId || "",
+          costo_unit: item.costo_unit || 0,
+          costo_total: (item.costo_unit || 0) * delta,
+          registradoPor: movimiento.registradoPor || null,
+        };
+        movimientoAgregado = reg;
+        next.entradas_inv = [...prev, reg];
+      }
+      return next;
+    });
+    // Replicar a la nube (fuera del setData para no replicar varias veces si React renderiza dos veces)
+    if (inventarioActualizado) replicarANube("upd", "inventario", inventarioActualizado);
+    if (movimientoAgregado) replicarANube("add", "entradas_inv", movimientoAgregado);
+  }, [setData, replicarANube]);
 
   const alertas = genAlertas(data);
 
@@ -1658,7 +1734,13 @@ function LoginScreen({ data, add, onLogin }) {
         setCargando(false); return;
       }
     }
-    // ---- Camino B: PIN (comportamiento original, sin cambios) ----
+    // ---- Camino B: PIN (comportamiento original + iniciar sesión técnica si está configurada) ----
+    // Si hay cuenta técnica configurada, la iniciamos en segundo plano para que la app pueda
+    // escribir a Supabase aunque el usuario haya entrado con PIN. Si falla, la app sigue
+    // funcionando solo-local (modo de respaldo).
+    if (cuentaTecnicaListo) {
+      iniciarConCuentaTecnica().catch(() => { /* sigue solo-local */ });
+    }
     if (role === "admin") {
       if (busq !== "1234") { setError("PIN incorrecto"); return; }
       onLogin({ role: "admin", nombre: "Administrador", id: "admin" });
