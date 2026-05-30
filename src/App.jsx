@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef, Component } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo, Component } from "react";
 import { supabase, supabaseListo, cuentaTecnicaListo, iniciarConCuentaTecnica } from "./supabase";
 import { migrarCatalogos, leerTodo, CATALOGOS, subirColeccion, guardarRegistro, borrarRegistro } from "./dataApi";
 import { generarPlantilla, leerExcel, excelAColecciones, validar, generarSQLCuentas, HOJAS } from "./excelLoader";
@@ -1409,7 +1409,9 @@ function normalizeData(d) {
 
 function AppInner() {
   const [rawData, setData] = useLS("agro_v7", INITIAL);
-  const data = normalizeData(rawData);
+  // normalizeData incluye el cálculo de mano de obra (recorre todas las actividades),
+  // así que lo memorizamos: solo se recalcula cuando rawData cambia, no en cada render.
+  const data = useMemo(() => normalizeData(rawData), [rawData]);
   const [session, setSession] = useState(null);
   const [page, setPageRaw] = useState("home");
   const [navParam, setNavParam] = useState(null);
@@ -2355,8 +2357,8 @@ function AdminInventario({ data, add, upd, del, setInv }) {
             ))}
             <button className="btn btn-accent" onClick={() => {
               if (!ent.insumoId || !ent.cantidad) return;
-              setInv(ent.insumoId, parseFloat(ent.cantidad));
-              add("entradas_inv", { ...ent, id: `ei${Date.now()}`, cantidad: parseFloat(ent.cantidad), costo_total: parseFloat(ent.costo_total) });
+              setInv(ent.insumoId, parseFloat(ent.cantidad) || 0);
+              add("entradas_inv", { ...ent, id: `ei${Date.now()}`, cantidad: parseFloat(ent.cantidad) || 0, costo_total: parseFloat(ent.costo_total) || 0 });
               setShowE(false); setEnt({ insumoId: "", cantidad: "", proveedor: "", costo_total: "", factura: "", fecha: today() });
             }}>Registrar Entrada</button>
           </div>
