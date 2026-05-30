@@ -1190,24 +1190,80 @@ function progresoSiembra(data, siembraId) {
   };
 }
 
+// Lista de tablas que existen en Supabase (definida una vez, fuera del hook).
+const TABLAS_NUBE = [
+  "ranchos","parcelas","cultivos","siembras","trabajadores",
+  "encargados","agronomos","cuadrillas","externos","maquinaria",
+  "inventario","actividades","cosechas","aplicaciones","ingresos",
+  "egresos","compras","entradas_inv","tareas","bonificaciones",
+  "incidencias","prestamos","cajachica","creditos","proveedores",
+  "ciclos","asistencia","envios_bodega",
+];
+
 function useOffline() {
   const [online, setOnline] = useState(typeof navigator !== "undefined" ? navigator.onLine : true);
-  const [pending, setPending] = useLS("agro_pending_v6", []);
+  // Cola de operaciones pendientes de enviar a Supabase. Cada item:
+  //   { id, operacion: "upd"|"del", sec, payload, queuedAt }
+  const [pending, setPending] = useLS("agro_pending_v7", []);
   const [justSynced, setJustSynced] = useState(false);
+  const [sincronizandoCola, setSincronizandoCola] = useState(false);
+
   useEffect(() => {
     const up = () => setOnline(true), dn = () => setOnline(false);
     window.addEventListener("online", up);
     window.addEventListener("offline", dn);
     return () => { window.removeEventListener("online", up); window.removeEventListener("offline", dn); };
   }, []);
+
+  // Agregar una operación a la cola de pendientes.
+  const queue = useCallback((operacion, sec, payload) => {
+    setPending(p => [...p, {
+      id: `q${Date.now()}${Math.floor(Math.random() * 1000)}`,
+      operacion, sec, payload, queuedAt: Date.now(),
+    }]);
+  }, [setPending]);
+
+  // Procesar la cola: intenta enviar cada operación pendiente a Supabase.
+  // Solo quita de la cola las que se enviaron con éxito.
+  const procesarCola = useCallback(async () => {
+    if (!supabaseListo || !online || sincronizandoCola) return;
+    setPending(actuales => {
+      if (actuales.length === 0) return actuales;
+      // Disparar el envío en segundo plano (no podemos hacer async dentro de setPending,
+      // así que tomamos una copia y procesamos afuera).
+      (async () => {
+        setSincronizandoCola(true);
+        const exitosas = new Set();
+        for (const op of actuales) {
+          try {
+            if (op.operacion === "del") await borrarRegistro(op.sec, op.payload);
+            else await guardarRegistro(op.sec, op.payload);
+            exitosas.add(op.id);
+          } catch (e) {
+            // Si una falla, la dejamos en la cola para el próximo intento.
+            console.warn(`Cola: no se pudo enviar ${op.operacion} en ${op.sec}:`, e?.message);
+          }
+        }
+        if (exitosas.size > 0) {
+          setPending(p => p.filter(op => !exitosas.has(op.id)));
+          setJustSynced(true);
+          setTimeout(() => setJustSynced(false), 4000);
+        }
+        setSincronizandoCola(false);
+      })();
+      return actuales; // no cambiamos la cola aquí; se filtra arriba al terminar
+    });
+  }, [online, sincronizandoCola, setPending]);
+
+  // Cuando vuelve la conexión y hay pendientes, procesar la cola.
   useEffect(() => {
     if (online && pending.length > 0) {
-      const t = setTimeout(() => { setPending([]); setJustSynced(true); setTimeout(() => setJustSynced(false), 4000); }, 1500);
+      const t = setTimeout(() => { procesarCola(); }, 1500);
       return () => clearTimeout(t);
     }
-  }, [online]);
-  const queue = item => setPending(p => [...p, { ...item, queuedAt: Date.now() }]);
-  return { online, pending, queue, justSynced };
+  }, [online, pending.length]);
+
+  return { online, pending, queue, justSynced, procesarCola };
 }
 
 /* ════════════ ERROR BOUNDARY ════════════ */
@@ -1433,31 +1489,27 @@ function AppInner() {
     } catch {}
   }, []);
 
-  // Función auxiliar: replica un cambio a Supabase si hay sesión válida.
-  // No bloquea — la app sigue funcionando aunque Supabase tarde o falle.
+  // Función auxiliar: replica un cambio a Supabase. Si no hay conexión o falla,
+  // lo encola para reintentar cuando vuelva la señal (Etapa 3 - sincronización offline).
   const replicarANube = useCallback((operacion, sec, payload) => {
     if (!supabaseListo) return;
-    // Solo replicar si la tabla existe en Supabase (es uno de los catálogos/movimientos definidos).
-    const TABLAS_NUBE = [
-      "ranchos","parcelas","cultivos","siembras","trabajadores",
-      "encargados","agronomos","cuadrillas","externos","maquinaria",
-      "inventario","actividades","cosechas","aplicaciones","ingresos",
-      "egresos","compras","entradas_inv","tareas","bonificaciones",
-      "incidencias","prestamos","cajachica","creditos","proveedores",
-      "ciclos","asistencia","envios_bodega",
-    ];
     if (!TABLAS_NUBE.includes(sec)) return;
+    // Si no hay conexión, directo a la cola.
+    if (!online) {
+      queue(operacion, sec, payload);
+      return;
+    }
+    // Hay conexión: intentar enviar ya. Si falla, encolar.
     (async () => {
       try {
         if (operacion === "del") await borrarRegistro(sec, payload);
         else await guardarRegistro(sec, payload);
       } catch (e) {
-        // Si falla, no rompemos la app. Por ahora solo avisamos en consola.
-        // En la Etapa 3 esto irá a una cola de sincronización offline.
-        console.warn(`No se pudo replicar ${operacion} en ${sec}:`, e?.message);
+        console.warn(`Replicar falló (${operacion} ${sec}), encolando:`, e?.message);
+        queue(operacion, sec, payload);
       }
     })();
-  }, []);
+  }, [online, queue]);
 
   const upd = useCallback((sec, item) => {
     setData(d => {
@@ -1470,10 +1522,9 @@ function AppInner() {
   const add = useCallback((sec, item) => {
     const ni = { ...item, id: item.id || `${sec[0]}${Date.now()}${Math.floor(Math.random() * 1000)}` };
     setData(d => ({ ...d, [sec]: [...(Array.isArray(d[sec]) ? d[sec] : []), ni] }));
-    if (!online) queue({ action: "add", sec, item: ni });
     replicarANube("add", sec, ni);
     return ni;
-  }, [setData, online, queue, replicarANube]);
+  }, [setData, replicarANube]);
 
   const del = useCallback((sec, id) => {
     setData(d => ({ ...d, [sec]: (Array.isArray(d[sec]) ? d[sec] : []).filter(x => x.id !== id) }));
