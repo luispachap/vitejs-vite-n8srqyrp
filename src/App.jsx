@@ -389,6 +389,7 @@ const INITIAL = {
   compras: [
     { id: "co1", fecha: "2024-12-02", trabajadorId: "t1", tipoTrab: "planta", descripcion: "Aceite hidráulico y filtros", monto: 1850, proveedor: "Refaccionaria El Campo", estado: "aprobada", ticket: null, afectaInventario: false, items: [] },
   ],
+  solicitudes_compra: [],
   encargados: [
     { id: "en1", nombre: "Pedro Ramírez", pin: "5555", sueldo_dia: 650, categoria: "encargado" },
   ],
@@ -590,6 +591,29 @@ function urlWhatsAppIndicacion(data, tarea) {
     return "";
   };
   const tel = buscarTel(tarea.asignadoA);
+  return tel ? `https://wa.me/${tel}?text=${mensaje}` : `https://wa.me/?text=${mensaje}`;
+}
+
+// Arma el mensaje de WhatsApp para COTIZAR una solicitud de compra.
+// Si se pasa un proveedor con teléfono, va directo a él; si no, abre WhatsApp genérico.
+function urlWhatsAppCotizacion(solicitud, proveedor) {
+  const partes = [];
+  partes.push(`🛒 *SOLICITUD DE COTIZACIÓN*`);
+  partes.push(`Agroselectos P&A`);
+  partes.push(``);
+  if (proveedor && proveedor.nombre) partes.push(`Para: ${proveedor.nombre}`);
+  partes.push(`Buen día, necesito cotización de lo siguiente:`);
+  partes.push(``);
+  (solicitud.items || []).forEach((it, i) => {
+    const cant = it.cantidad ? `${it.cantidad}${it.unidad ? " " + it.unidad : ""}` : "";
+    const linea = `${i + 1}. ${it.nombre}${cant ? " — " + cant : ""}${it.nota ? " (" + it.nota + ")" : ""}`;
+    partes.push(linea);
+  });
+  partes.push(``);
+  if (solicitud.paraCuando) partes.push(`Se necesita para: ${solicitud.paraCuando}`);
+  partes.push(`Quedo atento a precio y disponibilidad. ¡Gracias!`);
+  const mensaje = encodeURIComponent(partes.join("\n"));
+  const tel = proveedor && proveedor.telefono ? formatearTelefonoMX(proveedor.telefono) : "";
   return tel ? `https://wa.me/${tel}?text=${mensaje}` : `https://wa.me/?text=${mensaje}`;
 }
 
@@ -1197,7 +1221,7 @@ const TABLAS_NUBE = [
   "inventario","actividades","cosechas","aplicaciones","ingresos",
   "egresos","compras","entradas_inv","tareas","bonificaciones",
   "incidencias","prestamos","cajachica","creditos","proveedores",
-  "ciclos","asistencia","envios_bodega",
+  "ciclos","asistencia","envios_bodega","solicitudes_compra",
 ];
 
 function useOffline() {
@@ -1614,8 +1638,9 @@ function AppInner() {
   ];
   const navF = [
     { id: "home", icon: "💵", label: "Inicio" },
-    { id: "proyeccion", icon: "📅", label: "Semana" },
+    { id: "solicitudes", icon: "🛒", label: "Compras" },
     { id: "deudas", icon: "🏦", label: "Deudas" },
+    { id: "proyeccion", icon: "📅", label: "Semana" },
     { id: "contabilidad", icon: "📊", label: "Finanzas" },
   ];
   const navT = [
@@ -1670,6 +1695,7 @@ function AppInner() {
               {page === "respaldo" && <RespaldoDatos data={data} setData={setData} onClose={() => setPage("home")} />}
               {page === "panel-financiero" && <PanelFinanciero data={data} onClose={() => setPage("home")} />}
               {page === "subir-nube" && <SubirCatalogos data={data} setData={setData} session={session} onClose={() => setPage("home")} />}
+              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
             </>}
             {isEncargado && <>
               {page === "home" && <EncargadoHome data={data} session={session} onNav={setPage} onLogout={cerrarSesion} online={online} />}
@@ -1681,12 +1707,14 @@ function AppInner() {
               {page === "cosechas" && <GestionCosechas data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
               {page === "asistencia" && <GestionAsistencia data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
               {page === "aprobacion-externos" && <AprobacionExternos data={data} upd={upd} onBack={() => setPage("home")} />}
+              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
             </>}
             {isTrab && <>
               {page === "home" && <TrabReg data={data} add={add} upd={upd} setInv={setInv} session={session} online={online} onLogout={cerrarSesion} />}
               {page === "mis" && <TrabHistorial data={data} add={add} upd={upd} session={session} onLogout={cerrarSesion} />}
               {page === "compras" && <TrabCompras data={data} add={add} setInv={setInv} session={session} online={online} onLogout={cerrarSesion} />}
               {page === "reporte" && <TrabReporte data={data} add={add} session={session} onLogout={cerrarSesion} />}
+              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
             </>}
             {isCuad && <>
               {page === "home" && <CuadrillaReg data={data} add={add} upd={upd} setInv={setInv} session={session} online={online} onLogout={cerrarSesion} />}
@@ -1706,6 +1734,7 @@ function AppInner() {
               {page === "indicaciones" && <AgronomoIndicaciones data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
               {page === "compras-insumos" && <AgronomoCompras data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
               {page === "reporte" && <TrabReporte data={data} add={add} session={session} onLogout={cerrarSesion} />}
+              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
             </>}
             {isDueno && <>
               {page === "home" && <DuenoHome data={data} session={session} onNav={setPage} onLogout={cerrarSesion} />}
@@ -1719,6 +1748,7 @@ function AppInner() {
               {page === "proyeccion" && <ProyeccionSemanal data={data} onClose={() => setPage("home")} />}
               {page === "deudas" && <GestionDeudas data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
               {page === "contabilidad" && <AdminContabilidad data={data} add={add} upd={upd} del={del} setInv={setInv} />}
+              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
             </>}
           </ErrorBoundary>
         </div>
@@ -2018,6 +2048,7 @@ function AdminHome({ data, alertas, onNav, onLogout, pending, online }) {
             <div className="option-card" onClick={() => onNav("respaldo")}><span className="oc-icon">💾</span><span className="oc-label">Respaldo</span><span className="oc-sub">Guardar copia</span></div>
             <div className="option-card" onClick={() => onNav("panel-financiero")}><span className="oc-icon">💰</span><span className="oc-label">¿Cómo vamos?</span><span className="oc-sub">Resumen del dinero</span></div>
             <div className="option-card" onClick={() => onNav("subir-nube")}><span className="oc-icon">☁️</span><span className="oc-label">Subir a la nube</span><span className="oc-sub">Migración inicial</span></div>
+            <div className="option-card" onClick={() => onNav("solicitudes")}><span className="oc-icon">🛒</span><span className="oc-label">Compras</span><span className="oc-sub">Solicitudes del personal</span></div>
           </div>
         </div>
         <div className="card">
@@ -5052,6 +5083,7 @@ function EncargadoHome({ data, session, onNav, onLogout, online }) {
           <div className="option-grid" style={{ marginBottom: 0 }}>
             <div className="option-card" onClick={() => onNav("asistencia")}><span className="oc-icon">📅</span><span className="oc-label">Asistencia</span><span className="oc-sub">Pase de lista</span></div>
             <div className="option-card" onClick={() => onNav("caja")}><span className="oc-icon">💵</span><span className="oc-label">Caja chica</span><span className="oc-sub">Gastos y movimientos</span></div>
+            <div className="option-card" onClick={() => onNav("solicitudes")}><span className="oc-icon">🛒</span><span className="oc-label">Compras</span><span className="oc-sub">Solicitar y gestionar</span></div>
           </div>
         </div>
         <div className="card">
@@ -7549,6 +7581,7 @@ function AgronomoHome({ data, session, onNav, onLogout, online }) {
             <div className="option-card" onClick={() => onNav("indicaciones")}><span className="oc-icon">📋</span><span className="oc-label">Indicaciones</span><span className="oc-sub">Mandar al personal</span></div>
             <div className="option-card" onClick={() => onNav("compras-insumos")}><span className="oc-icon">🛒</span><span className="oc-label">Insumos</span><span className="oc-sub">Comprar / pedir</span></div>
             <div className="option-card" onClick={() => onNav("reporte")}><span className="oc-icon">⚠️</span><span className="oc-label">Reportar</span><span className="oc-sub">Incidencia en cultivo</span></div>
+            <div className="option-card" onClick={() => onNav("solicitudes")}><span className="oc-icon">🛒</span><span className="oc-label">Solicitar compra</span><span className="oc-sub">Lista para finanzas</span></div>
           </div>
         </div>
 
@@ -8897,6 +8930,264 @@ function CompletarIndicacionModal({ tarea, data, add, upd, setInv, session, onCl
             {guardando ? "Guardando..." : "✓ Marcar como hecha"}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/* ════════════ SOLICITUDES DE COMPRA ════════════ */
+/* Cualquiera crea solicitudes itemizadas. Finanzas/admin/encargados las gestionan.
+   Botón de WhatsApp para cotizar con proveedores. */
+function SolicitudesCompra({ data, add, upd, del, session, onClose }) {
+  const rol = session.role;
+  const puedeGestionar = ["admin", "finanzas", "encargado", "dueno"].includes(rol);
+  const [showForm, setShowForm] = useState(false);
+  const [verSolic, setVerSolic] = useState(null); // solicitud abierta en detalle
+  const [filtro, setFiltro] = useState("todas"); // todas | pendiente | cotizando | comprada
+
+  // Formulario de nueva solicitud
+  const F0 = { paraCuando: "", notas: "", items: [] };
+  const [form, setForm] = useState(F0);
+  const [itemTmp, setItemTmp] = useState({ insumoId: "", nombre: "", cantidad: "", unidad: "", nota: "" });
+
+  // Mis solicitudes (las que creé) o todas (si gestiono)
+  const solicitudes = (data.solicitudes_compra || [])
+    .filter(s => puedeGestionar || (s.creadaPor && s.creadaPor.id === session.id))
+    .filter(s => filtro === "todas" || s.estado === filtro)
+    .sort((a, b) => (b.fecha || "").localeCompare(a.fecha || ""));
+
+  const agregarItem = () => {
+    const nombre = itemTmp.insumoId
+      ? (data.inventario.find(i => i.id === itemTmp.insumoId)?.nombre || itemTmp.nombre)
+      : itemTmp.nombre.trim();
+    if (!nombre) { alert("Escribe o elige un producto."); return; }
+    const inv = itemTmp.insumoId ? data.inventario.find(i => i.id === itemTmp.insumoId) : null;
+    setForm(f => ({
+      ...f,
+      items: [...f.items, {
+        id: `it${Date.now()}`,
+        insumoId: itemTmp.insumoId || null,
+        nombre,
+        cantidad: itemTmp.cantidad || "",
+        unidad: itemTmp.unidad || (inv?.unidad || ""),
+        nota: itemTmp.nota.trim(),
+      }],
+    }));
+    setItemTmp({ insumoId: "", nombre: "", cantidad: "", unidad: "", nota: "" });
+  };
+
+  const quitarItem = (id) => setForm(f => ({ ...f, items: f.items.filter(x => x.id !== id) }));
+
+  const guardar = () => {
+    if (form.items.length === 0) { alert("Agrega al menos un producto a la solicitud."); return; }
+    add("solicitudes_compra", {
+      fecha: today(),
+      paraCuando: form.paraCuando,
+      notas: form.notas,
+      items: form.items,
+      estado: "pendiente",
+      creadaPor: { id: session.id, nombre: session.nombre || "", rol },
+    });
+    setForm(F0);
+    setShowForm(false);
+  };
+
+  const cambiarEstado = (s, nuevoEstado) => upd("solicitudes_compra", { ...s, estado: nuevoEstado });
+
+  const badgeColor = (estado) => estado === "comprada" ? "green" : estado === "cotizando" ? "gold" : estado === "cancelada" ? "red" : "blue";
+  const estadoLabel = (estado) => ({ pendiente: "Pendiente", cotizando: "Cotizando", comprada: "Comprada", cancelada: "Cancelada" }[estado] || estado);
+
+  // ── Vista detalle de una solicitud ──
+  if (verSolic) {
+    const s = (data.solicitudes_compra || []).find(x => x.id === verSolic.id) || verSolic;
+    return (
+      <div>
+        <div className="top-bar">
+          <button className="btn-ghost" onClick={() => setVerSolic(null)}>‹</button>
+          <h2>Solicitud de compra</h2>
+        </div>
+        <div className="section-pad">
+          <div className="card">
+            <div className="flex-b mb-2">
+              <span className={`badge badge-${badgeColor(s.estado)}`}>{estadoLabel(s.estado)}</span>
+              <span className="text-xs text-muted">{s.fecha}</span>
+            </div>
+            <div className="text-sm text-muted">Solicitó: {s.creadaPor?.nombre || "—"} ({s.creadaPor?.rol || "—"})</div>
+            {s.paraCuando && <div className="text-sm mt-1">📅 Para: {s.paraCuando}</div>}
+            {s.notas && <div className="text-sm mt-2" style={{ fontStyle: "italic" }}>{s.notas}</div>}
+          </div>
+
+          <div className="card">
+            <div className="card-title">Productos ({s.items?.length || 0})</div>
+            {(s.items || []).map((it, i) => (
+              <div key={it.id || i} className="list-item">
+                <div className="li-body">
+                  <div className="li-title">{i + 1}. {it.nombre}</div>
+                  <div className="li-sub">
+                    {it.cantidad ? `${it.cantidad} ${it.unidad || ""}` : "cantidad sin especificar"}
+                    {it.nota ? ` · ${it.nota}` : ""}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {puedeGestionar && (
+            <>
+              <div className="card">
+                <div className="card-title">📲 Cotizar por WhatsApp</div>
+                <div className="text-sm text-muted mb-3">Manda la lista a un proveedor para pedir precio. Elige uno o mándalo genérico.</div>
+                {(data.proveedores || []).length > 0 && (
+                  <div style={{ marginBottom: 10 }}>
+                    {(data.proveedores || []).map(pv => (
+                      <a key={pv.id} className="btn btn-outline btn-sm mb-2" style={{ width: "100%", textDecoration: "none", display: "block" }}
+                         href={urlWhatsAppCotizacion(s, pv)} target="_blank" rel="noopener noreferrer"
+                         onClick={() => { if (s.estado === "pendiente") cambiarEstado(s, "cotizando"); }}>
+                        📲 {pv.nombre}{pv.telefono ? "" : " (elegir contacto)"}
+                      </a>
+                    ))}
+                  </div>
+                )}
+                <a className="btn btn-accent btn-sm" style={{ width: "100%", textDecoration: "none", display: "block" }}
+                   href={urlWhatsAppCotizacion(s, null)} target="_blank" rel="noopener noreferrer"
+                   onClick={() => { if (s.estado === "pendiente") cambiarEstado(s, "cotizando"); }}>
+                  📲 Mandar genérico (elegir contacto)
+                </a>
+              </div>
+
+              <div className="card">
+                <div className="card-title">Cambiar estado</div>
+                <div className="gap-row" style={{ flexWrap: "wrap" }}>
+                  {["pendiente", "cotizando", "comprada", "cancelada"].map(est => (
+                    <button key={est} className={`btn btn-sm ${s.estado === est ? "btn-accent" : "btn-outline"}`}
+                            style={{ flex: "1 1 45%" }} onClick={() => cambiarEstado(s, est)}>
+                      {estadoLabel(est)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <button className="btn btn-danger" onClick={() => { if (confirm("¿Borrar esta solicitud?")) { del("solicitudes_compra", s.id); setVerSolic(null); } }}>
+                🗑 Borrar solicitud
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Vista principal: lista + crear ──
+  return (
+    <div>
+      <div className="top-bar">
+        {onClose && <button className="btn-ghost" onClick={onClose}>‹</button>}
+        <h2>Solicitudes de compra 🛒</h2>
+      </div>
+      <div className="section-pad">
+        {!showForm && (
+          <button className="btn btn-accent mb-3" style={{ width: "100%" }} onClick={() => setShowForm(true)}>
+            + Nueva solicitud
+          </button>
+        )}
+
+        {showForm && (
+          <div className="card">
+            <div className="card-title">Nueva solicitud de compra</div>
+
+            <div className="form-group">
+              <label className="form-label">¿Para cuándo se necesita? (opcional)</label>
+              <input className="inp" placeholder="Ej: esta semana, antes del viernes..." value={form.paraCuando} onChange={e => setForm(f => ({ ...f, paraCuando: e.target.value }))} />
+            </div>
+
+            <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12, marginTop: 4 }}>
+              <div className="card-title">Agregar producto</div>
+              <div className="form-group">
+                <label className="form-label">Del inventario (opcional)</label>
+                <select className="inp" value={itemTmp.insumoId} onChange={e => {
+                  const inv = data.inventario.find(i => i.id === e.target.value);
+                  setItemTmp(x => ({ ...x, insumoId: e.target.value, nombre: inv?.nombre || "", unidad: inv?.unidad || "" }));
+                }}>
+                  <option value="">— Escribir libre —</option>
+                  {(data.inventario || []).map(i => <option key={i.id} value={i.id}>{i.emoji || "📦"} {i.nombre}</option>)}
+                </select>
+              </div>
+              {!itemTmp.insumoId && (
+                <div className="form-group">
+                  <label className="form-label">Producto (texto libre)</label>
+                  <input className="inp" placeholder="Ej: Urea, Glifosato, semilla..." value={itemTmp.nombre} onChange={e => setItemTmp(x => ({ ...x, nombre: e.target.value }))} />
+                </div>
+              )}
+              <div className="gap-row">
+                <div className="form-group" style={{ flex: 1 }}>
+                  <label className="form-label">Cantidad</label>
+                  <input type="number" className="inp" placeholder="0" value={itemTmp.cantidad} onChange={e => setItemTmp(x => ({ ...x, cantidad: e.target.value }))} />
+                </div>
+                <div className="form-group" style={{ flex: 1 }}>
+                  <label className="form-label">Unidad</label>
+                  <input className="inp" placeholder="kg, L, pza..." value={itemTmp.unidad} onChange={e => setItemTmp(x => ({ ...x, unidad: e.target.value }))} />
+                </div>
+              </div>
+              <div className="form-group">
+                <label className="form-label">Nota (opcional)</label>
+                <input className="inp" placeholder="Marca, urgencia, detalle..." value={itemTmp.nota} onChange={e => setItemTmp(x => ({ ...x, nota: e.target.value }))} />
+              </div>
+              <button className="btn btn-outline btn-sm" style={{ width: "100%" }} onClick={agregarItem}>+ Agregar a la lista</button>
+            </div>
+
+            {form.items.length > 0 && (
+              <div style={{ marginTop: 14 }}>
+                <div className="card-title">Lista ({form.items.length})</div>
+                {form.items.map((it, i) => (
+                  <div key={it.id} className="list-item">
+                    <div className="li-body">
+                      <div className="li-title">{i + 1}. {it.nombre}</div>
+                      <div className="li-sub">{it.cantidad ? `${it.cantidad} ${it.unidad || ""}` : "—"}{it.nota ? ` · ${it.nota}` : ""}</div>
+                    </div>
+                    <button className="btn btn-danger btn-sm" style={{ flex: "0 0 auto" }} onClick={() => quitarItem(it.id)}>✕</button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="form-group" style={{ marginTop: 12 }}>
+              <label className="form-label">Notas generales (opcional)</label>
+              <textarea className="inp" placeholder="Cualquier comentario para quien gestione la compra..." value={form.notas} onChange={e => setForm(f => ({ ...f, notas: e.target.value }))} />
+            </div>
+
+            <div className="gap-row mt-2">
+              <button className="btn btn-outline" style={{ flex: 1 }} onClick={() => { setForm(F0); setShowForm(false); }}>Cancelar</button>
+              <button className="btn btn-accent" style={{ flex: 1.5 }} onClick={guardar}>Enviar solicitud</button>
+            </div>
+          </div>
+        )}
+
+        {!showForm && (
+          <>
+            {puedeGestionar && (
+              <div className="tabs-pill mb-3">
+                {[["todas", "Todas"], ["pendiente", "Pendientes"], ["cotizando", "Cotizando"], ["comprada", "Compradas"]].map(([v, lb]) => (
+                  <button key={v} className={`tab-pill${filtro === v ? " active" : ""}`} onClick={() => setFiltro(v)}>{lb}</button>
+                ))}
+              </div>
+            )}
+            {solicitudes.length === 0 && <div className="text-muted text-sm" style={{ textAlign: "center", padding: "32px 0" }}>Sin solicitudes {filtro !== "todas" ? `(${estadoLabel(filtro).toLowerCase()})` : ""}</div>}
+            {solicitudes.map(s => (
+              <div key={s.id} className="card" style={{ cursor: "pointer" }} onClick={() => setVerSolic(s)}>
+                <div className="flex-b mb-1">
+                  <span className={`badge badge-${badgeColor(s.estado)}`}>{estadoLabel(s.estado)}</span>
+                  <span className="text-xs text-muted">{s.fecha}</span>
+                </div>
+                <div className="font-bold">{s.items?.length || 0} producto(s)</div>
+                <div className="text-sm text-muted" style={{ marginTop: 2 }}>
+                  {(s.items || []).slice(0, 3).map(it => it.nombre).join(", ")}{(s.items?.length || 0) > 3 ? "..." : ""}
+                </div>
+                {puedeGestionar && <div className="text-xs text-muted" style={{ marginTop: 4 }}>Solicitó: {s.creadaPor?.nombre || "—"}</div>}
+                {s.paraCuando && <div className="text-xs" style={{ color: "var(--accent)", marginTop: 2 }}>📅 {s.paraCuando}</div>}
+              </div>
+            ))}
+          </>
+        )}
       </div>
     </div>
   );
