@@ -390,6 +390,7 @@ const INITIAL = {
     { id: "co1", fecha: "2024-12-02", trabajadorId: "t1", tipoTrab: "planta", descripcion: "Aceite hidráulico y filtros", monto: 1850, proveedor: "Refaccionaria El Campo", estado: "aprobada", ticket: null, afectaInventario: false, items: [] },
   ],
   solicitudes_compra: [],
+  bitacora: [],
   encargados: [
     { id: "en1", nombre: "Pedro Ramírez", pin: "5555", sueldo_dia: 650, categoria: "encargado" },
   ],
@@ -1221,7 +1222,7 @@ const TABLAS_NUBE = [
   "inventario","actividades","cosechas","aplicaciones","ingresos",
   "egresos","compras","entradas_inv","tareas","bonificaciones",
   "incidencias","prestamos","cajachica","creditos","proveedores",
-  "ciclos","asistencia","envios_bodega","solicitudes_compra",
+  "ciclos","asistencia","envios_bodega","solicitudes_compra","bitacora",
 ];
 
 function useOffline() {
@@ -1689,7 +1690,7 @@ function AppInner() {
               {page === "cosechas" && <GestionCosechas data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
               {page === "ciclos" && <GestionCiclos data={data} add={add} upd={upd} del={del} onClose={() => setPage("home")} />}
               {page === "calendario" && <CalendarioCultivos data={data} add={add} upd={upd} del={del} onClose={() => setPage("home")} />}
-              {page === "panel-parcelas" && <PanelParcelas data={data} onClose={() => setPage("home")} onNav={setPage} />}
+              {page === "panel-parcelas" && <PanelParcelas data={data} add={add} del={del} session={session} onClose={() => setPage("home")} onNav={setPage} />}
               {page === "asistencia" && <GestionAsistencia data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
               {page === "resumen" && <ResumenSemanal data={data} onClose={() => setPage("home")} />}
               {page === "respaldo" && <RespaldoDatos data={data} setData={setData} onClose={() => setPage("home")} />}
@@ -1730,7 +1731,7 @@ function AppInner() {
             {isAgronomo && <>
               {page === "home" && <AgronomoHome data={data} session={session} onNav={setPage} onLogout={cerrarSesion} online={online} />}
               {page === "aplicaciones" && <GestionAplicaciones data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
-              {page === "panel-parcelas" && <PanelParcelas data={data} onClose={() => setPage("home")} />}
+              {page === "panel-parcelas" && <PanelParcelas data={data} add={add} del={del} session={session} onClose={() => setPage("home")} />}
               {page === "indicaciones" && <AgronomoIndicaciones data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
               {page === "compras-insumos" && <AgronomoCompras data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
               {page === "reporte" && <TrabReporte data={data} add={add} session={session} onLogout={cerrarSesion} />}
@@ -1740,7 +1741,7 @@ function AppInner() {
               {page === "home" && <DuenoHome data={data} session={session} onNav={setPage} onLogout={cerrarSesion} />}
               {page === "panel-financiero" && <PanelFinanciero data={data} onClose={() => setPage("home")} />}
               {page === "reportes" && <AdminReportes data={data} soloLectura={true} />}
-              {page === "panel-parcelas" && <PanelParcelas data={data} onClose={() => setPage("home")} />}
+              {page === "panel-parcelas" && <PanelParcelas data={data} add={add} del={del} session={session} onClose={() => setPage("home")} />}
               {page === "resumen" && <ResumenSemanal data={data} onClose={() => setPage("home")} />}
             </>}
             {isFinanzas && <>
@@ -7009,8 +7010,9 @@ function CalendarioCultivos({ data, add, upd, del, onClose }) {
 /* ════════════ PANEL DE ESTADO DE PARCELAS — ADMIN ════════════ */
 /* Vista visual del avance de cada parcela: etapa fenológica, progreso
    de cada actividad (real vs esperado) y señal de atraso. */
-function PanelParcelas({ data, onClose, onNav }) {
+function PanelParcelas({ data, add, del, session, onClose, onNav }) {
   const [detalle, setDetalle] = useState(null); // siembraId
+  const [verBitacora, setVerBitacora] = useState(false);
 
   const colorSemaforo = s => s === "rojo" ? "var(--red)" : s === "amarillo" ? "var(--gold)" : "var(--safe)";
   const textoSemaforo = s => s === "rojo" ? "Atrasada" : s === "amarillo" ? "Algo atrasada" : "A tiempo";
@@ -7099,10 +7101,21 @@ function PanelParcelas({ data, onClose, onNav }) {
           )}
 
           <div className="gap-row">
-            <button className="btn btn-outline" onClick={() => onNav("registrar-actividad")}>Registrar actividad</button>
-            <button className="btn btn-outline" onClick={() => onNav("calendario")}>Ver siembra</button>
+            <button className="btn btn-outline" onClick={() => setVerBitacora(true)}>📒 Bitácora</button>
+            {onNav && <button className="btn btn-outline" onClick={() => onNav("registrar-actividad")}>Registrar actividad</button>}
           </div>
         </div>
+        {verBitacora && (
+          <div className="modal-overlay" onClick={() => setVerBitacora(false)}>
+            <div className="modal-sheet" onClick={e => e.stopPropagation()}>
+              <div className="flex-b mb-3">
+                <h3 style={{ margin: 0, fontSize: 18 }}>📒 Bitácora · {pr.p?.nombre}</h3>
+                <button className="btn-ghost" onClick={() => setVerBitacora(false)} style={{ fontSize: 20 }}>✕</button>
+              </div>
+              <BitacoraParcela data={data} add={add} del={del} parcelaId={pr.p?.id} session={session} embedded />
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -9189,6 +9202,133 @@ function SolicitudesCompra({ data, add, upd, del, session, onClose }) {
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ════════════ BITÁCORA DE PARCELA ════════════ */
+/* Historial de notas de manejo por parcela. Tipos: observación, problema,
+   aplicación, decisión, clima, otro. Todas las cuentas reales pueden escribir. */
+const TIPOS_BITACORA = [
+  { v: "observacion", label: "Observación", emoji: "👁️", color: "blue" },
+  { v: "problema", label: "Problema", emoji: "⚠️", color: "red" },
+  { v: "aplicacion", label: "Aplicación", emoji: "🧪", color: "green" },
+  { v: "decision", label: "Decisión", emoji: "🧭", color: "gold" },
+  { v: "clima", label: "Clima", emoji: "🌦️", color: "blue" },
+  { v: "otro", label: "Otro", emoji: "📝", color: "gray" },
+];
+
+function BitacoraParcela({ data, add, del, parcelaId, session, onClose, embedded }) {
+  const [showForm, setShowForm] = useState(false);
+  const [filtro, setFiltro] = useState("todas");
+  const [form, setForm] = useState({ tipo: "observacion", texto: "", fecha: today() });
+
+  const parcela = (data.parcelas || []).find(p => p.id === parcelaId);
+  const puedeEscribir = ["admin", "encargado", "agronomo", "dueno", "finanzas"].includes(session.role);
+
+  const notas = (data.bitacora || [])
+    .filter(n => n.parcelaId === parcelaId)
+    .filter(n => filtro === "todas" || n.tipo === filtro)
+    .sort((a, b) => (b.fecha || "").localeCompare(a.fecha || "") || (b.creadaEn || 0) - (a.creadaEn || 0));
+
+  const tipoInfo = (t) => TIPOS_BITACORA.find(x => x.v === t) || TIPOS_BITACORA[5];
+
+  const guardar = () => {
+    if (!form.texto.trim()) { alert("Escribe la nota."); return; }
+    const siembra = (data.siembras || []).find(s => s.parcelaId === parcelaId && s.estado !== "cosechada");
+    add("bitacora", {
+      parcelaId,
+      tipo: form.tipo,
+      texto: form.texto.trim(),
+      fecha: form.fecha || today(),
+      creadaEn: Date.now(),
+      cultivoNombre: siembra?.cultivoNombre || parcela?.cultivo || "",
+      creadaPor: { id: session.id, nombre: session.nombre || "", rol: session.role },
+    });
+    setForm({ tipo: "observacion", texto: "", fecha: today() });
+    setShowForm(false);
+  };
+
+  const contenido = (
+    <>
+      {puedeEscribir && !showForm && (
+        <button className="btn btn-accent mb-3" style={{ width: "100%" }} onClick={() => setShowForm(true)}>
+          + Nueva nota
+        </button>
+      )}
+
+      {showForm && (
+        <div className="card">
+          <div className="card-title">Nueva nota de bitácora</div>
+          <div className="form-group">
+            <label className="form-label">Tipo</label>
+            <div className="gap-row" style={{ flexWrap: "wrap" }}>
+              {TIPOS_BITACORA.map(t => (
+                <button key={t.v} className={`btn btn-sm ${form.tipo === t.v ? "btn-accent" : "btn-outline"}`}
+                        style={{ flex: "1 1 30%" }} onClick={() => setForm(f => ({ ...f, tipo: t.v }))}>
+                  {t.emoji} {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Fecha</label>
+            <input type="date" className="inp" value={form.fecha} onChange={e => setForm(f => ({ ...f, fecha: e.target.value }))} max={today()} />
+          </div>
+          <div className="form-group">
+            <label className="form-label">Nota</label>
+            <textarea className="inp" style={{ minHeight: 90 }} placeholder="Ej: Se aplicó fungicida en el sector norte porque apareció mancha foliar tras las lluvias..." value={form.texto} onChange={e => setForm(f => ({ ...f, texto: e.target.value }))} />
+          </div>
+          <div className="gap-row mt-2">
+            <button className="btn btn-outline" style={{ flex: 1 }} onClick={() => { setForm({ tipo: "observacion", texto: "", fecha: today() }); setShowForm(false); }}>Cancelar</button>
+            <button className="btn btn-accent" style={{ flex: 1.5 }} onClick={guardar}>Guardar nota</button>
+          </div>
+        </div>
+      )}
+
+      {!showForm && (
+        <div className="tabs-pill mb-3" style={{ flexWrap: "wrap" }}>
+          <button className={`tab-pill${filtro === "todas" ? " active" : ""}`} onClick={() => setFiltro("todas")}>Todas</button>
+          {TIPOS_BITACORA.map(t => (
+            <button key={t.v} className={`tab-pill${filtro === t.v ? " active" : ""}`} onClick={() => setFiltro(t.v)}>{t.emoji}</button>
+          ))}
+        </div>
+      )}
+
+      {notas.length === 0 && <div className="text-muted text-sm" style={{ textAlign: "center", padding: "28px 0" }}>Sin notas {filtro !== "todas" ? `de tipo "${tipoInfo(filtro).label}"` : "todavía"}</div>}
+
+      {notas.map(n => {
+        const ti = tipoInfo(n.tipo);
+        return (
+          <div key={n.id} className="card" style={{ borderLeft: `3px solid var(--${ti.color === "gray" ? "muted" : ti.color === "red" ? "red" : ti.color === "green" ? "safe" : ti.color === "gold" ? "gold" : "accent"})` }}>
+            <div className="flex-b mb-1">
+              <span className="text-sm font-bold">{ti.emoji} {ti.label}</span>
+              <span className="text-xs text-muted">{n.fecha}</span>
+            </div>
+            <div className="text-sm" style={{ lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{n.texto}</div>
+            <div className="flex-b" style={{ marginTop: 8 }}>
+              <span className="text-xs text-muted">{n.creadaPor?.nombre || "—"}{n.cultivoNombre ? ` · ${n.cultivoNombre}` : ""}</span>
+              {puedeEscribir && (n.creadaPor?.id === session.id || session.role === "admin") && (
+                <button className="btn-ghost text-xs" style={{ color: "var(--red)" }} onClick={() => { if (confirm("¿Borrar esta nota?")) del("bitacora", n.id); }}>borrar</button>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </>
+  );
+
+  // Modo embebido (dentro de otra pantalla): solo el contenido, sin top-bar.
+  if (embedded) return <div>{contenido}</div>;
+
+  // Modo pantalla completa
+  return (
+    <div>
+      <div className="top-bar">
+        {onClose && <button className="btn-ghost" onClick={onClose}>‹</button>}
+        <h2>Bitácora{parcela ? ` · ${parcela.nombre}` : ""} 📒</h2>
+      </div>
+      <div className="section-pad">{contenido}</div>
     </div>
   );
 }
