@@ -1792,6 +1792,20 @@ function AppInner() {
               {page === "subir-nube" && <SubirCatalogos data={data} setData={setData} session={session} onClose={() => setPage("home")} />}
               {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
               {page === "operacion" && <PanelOperacion data={data} onClose={() => setPage("home")} onVerParcela={() => setPage("calendario")} />}
+              {/* Funciones de gestión heredadas de otros perfiles (el admin puede todo) */}
+              {page === "indicaciones" && <AgronomoIndicaciones data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
+              {page === "aplicaciones" && <GestionAplicaciones data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
+              {page === "compras-insumos" && <AgronomoCompras data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
+              {page === "deudas" && <GestionDeudas data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
+              {page === "proyeccion" && <ProyeccionSemanal data={data} onClose={() => setPage("home")} />}
+              {page === "tareas" && <EncargadoTareas data={data} add={add} upd={upd} del={del} session={session} />}
+              {page === "personal" && <EncargadoPersonal data={data} add={add} upd={upd} del={del} session={session} />}
+              {page === "caja" && <EncargadoCaja data={data} add={add} upd={upd} del={del} session={session} />}
+              {/* Vistas de trabajador (para que el admin pueda ver/probar lo que ve el personal) */}
+              {page === "mis" && <TrabHistorial data={data} add={add} upd={upd} session={session} onLogout={() => setPage("home")} />}
+              {page === "compras" && <TrabCompras data={data} add={add} setInv={setInv} session={session} online={online} onLogout={() => setPage("home")} />}
+              {page === "reporte" && <TrabReporte data={data} add={add} session={session} onLogout={() => setPage("home")} />}
+              {page === "mas-funciones" && <AdminMasFunciones onNav={setPage} onClose={() => setPage("home")} />}
             </>}
             {isEncargado && <>
               {page === "home" && <EncargadoHome data={data} session={session} onNav={setPage} onLogout={cerrarSesion} online={online} />}
@@ -2150,6 +2164,7 @@ function AdminHome({ data, alertas, onNav, onLogout, pending, online }) {
             <div className="option-card" onClick={() => onNav("subir-nube")}><span className="oc-icon">☁️</span><span className="oc-label">Subir a la nube</span><span className="oc-sub">Migración inicial</span></div>
             <div className="option-card" onClick={() => onNav("solicitudes")}><span className="oc-icon">🛒</span><span className="oc-label">Compras</span><span className="oc-sub">Solicitudes del personal</span></div>
             <div className="option-card" onClick={() => onNav("operacion")}><span className="oc-icon">🎯</span><span className="oc-label">Operación</span><span className="oc-sub">Qué pasa ahora en campo</span></div>
+            <div className="option-card" onClick={() => onNav("mas-funciones")}><span className="oc-icon">🧰</span><span className="oc-label">Más funciones</span><span className="oc-sub">Todo lo demás</span></div>
           </div>
         </div>
         <div className="card">
@@ -7138,6 +7153,7 @@ function CalendarioCultivos({ data, add, upd, del, session, onClose }) {
 function PanelParcelas({ data, add, del, session, onClose, onNav }) {
   const [detalle, setDetalle] = useState(null); // siembraId
   const [verBitacora, setVerBitacora] = useState(false);
+  const [reportarAvance, setReportarAvance] = useState(null); // { siembra, etapa, actual }
 
   const colorSemaforo = s => s === "rojo" ? "var(--red)" : s === "amarillo" ? "var(--gold)" : "var(--safe)";
   const textoSemaforo = s => s === "rojo" ? "Atrasada" : s === "amarillo" ? "Algo atrasada" : "A tiempo";
@@ -7166,8 +7182,8 @@ function PanelParcelas({ data, add, del, session, onClose, onNav }) {
           </div>
 
           <div className="card">
-            <div className="card-title">Progreso por actividad</div>
-            <div className="text-xs text-muted mb-3">Barra verde: lo realizado. Línea: lo que se esperaba a esta fecha.</div>
+            <div className="card-title">Avance por fase</div>
+            <div className="text-xs text-muted mb-3">Barra: lo realizado. Línea: lo esperado a esta fecha. Puedes reportar a mano lo que se ve en campo.</div>
             {pr.etapas.map((e, i) => (
               <div key={i} style={{ borderBottom: i < pr.etapas.length - 1 ? "1px solid var(--border)" : "none", paddingBottom: 14, marginBottom: 14 }}>
                 <div className="flex-b mb-2">
@@ -7196,6 +7212,15 @@ function PanelParcelas({ data, add, del, session, onClose, onNav }) {
                 )}
                 {!e.tieneSuperficie && e.nActs > 0 && (
                   <div className="text-xs text-muted" style={{ marginTop: 4 }}>Avance estimado por fechas (no se capturó superficie)</div>
+                )}
+                {e.fuenteAvance === "manual" && (
+                  <div className="text-xs" style={{ color: "var(--accent)", marginTop: 4 }}>✓ Reportado en campo{e.avManual?.fecha ? ` · ${e.avManual.fecha}` : ""}</div>
+                )}
+                {pr.si.estado === "activa" && session && ["admin", "encargado", "agronomo", "dueno", "finanzas"].includes(session.role) && (
+                  <button className="btn-ghost text-xs" style={{ color: "var(--accent)", fontWeight: 700, marginTop: 6, padding: 0 }}
+                          onClick={() => setReportarAvance({ siembra: pr.si, etapa: e.etapa, actual: e.avManual })}>
+                    + Reportar avance de esta fase
+                  </button>
                 )}
               </div>
             ))}
@@ -7240,6 +7265,12 @@ function PanelParcelas({ data, add, del, session, onClose, onNav }) {
               <BitacoraParcela data={data} add={add} del={del} parcelaId={pr.p?.id} session={session} embedded />
             </div>
           </div>
+        )}
+        {reportarAvance && (
+          <ReportarAvanceModal
+            siembra={reportarAvance.siembra} etapa={reportarAvance.etapa} actual={reportarAvance.actual}
+            data={data} add={add} session={session} onClose={() => setReportarAvance(null)}
+          />
         )}
       </div>
     );
@@ -7717,7 +7748,7 @@ function AgronomoHome({ data, session, onNav, onLogout, online }) {
             <div className="option-card" onClick={() => onNav("aplicaciones")}><span className="oc-icon">🧪</span><span className="oc-label">Registrar</span><span className="oc-sub">Fertirriego / tratamiento</span></div>
             <div className="option-card" onClick={() => onNav("panel-parcelas")}><span className="oc-icon">🌾</span><span className="oc-label">Parcelas</span><span className="oc-sub">Estado de cultivos</span></div>
             <div className="option-card" onClick={() => onNav("indicaciones")}><span className="oc-icon">📋</span><span className="oc-label">Indicaciones</span><span className="oc-sub">Mandar al personal</span></div>
-            <div className="option-card" onClick={() => onNav("compras-insumos")}><span className="oc-icon">🛒</span><span className="oc-label">Insumos</span><span className="oc-sub">Comprar / pedir</span></div>
+            <div className="option-card" onClick={() => onNav("compras-insumos")}><span className="oc-icon">📦</span><span className="oc-label">Registrar compra</span><span className="oc-sub">Insumo ya comprado</span></div>
             <div className="option-card" onClick={() => onNav("reporte")}><span className="oc-icon">⚠️</span><span className="oc-label">Reportar</span><span className="oc-sub">Incidencia en cultivo</span></div>
             <div className="option-card" onClick={() => onNav("solicitudes")}><span className="oc-icon">🛒</span><span className="oc-label">Solicitar compra</span><span className="oc-sub">Lista para finanzas</span></div>
             <div className="option-card" onClick={() => onNav("operacion")}><span className="oc-icon">🎯</span><span className="oc-label">Operación</span><span className="oc-sub">Qué pasa ahora en campo</span></div>
@@ -8067,9 +8098,7 @@ function AgronomoIndicaciones({ data, add, upd, del, setInv, session, onClose })
 
 /* ──── Agrónomo: compras de insumos y órdenes de compra ──── */
 function AgronomoCompras({ data, add, upd, del, setInv, session, onClose }) {
-  const [tab, setTab] = useState("comprar");
   const [compraForm, setCompraForm] = useState({ insumoId: "", nuevoNombre: "", cat: "fertilizante", unidad: "kg", cantidad: "", costoTotal: "", proveedor: "", fecha: today() });
-  const [ordenForm, setOrdenForm] = useState({ descripcion: "", cantidad: "", justificacion: "", prioridad: "media" });
 
   // Registrar una compra: entra al inventario y genera un egreso
   const registrarCompra = () => {
@@ -8108,101 +8137,48 @@ function AgronomoCompras({ data, add, upd, del, setInv, session, onClose }) {
     alert("Compra registrada: entró al inventario y se reflejó en finanzas.");
   };
 
-  const enviarOrden = () => {
-    if (!ordenForm.descripcion.trim()) { alert("Describe qué insumo se necesita"); return; }
-    add("compras", {
-      id: `oc${Date.now()}`, fecha: today(), descripcion: ordenForm.descripcion,
-      cantidad: ordenForm.cantidad, justificacion: ordenForm.justificacion,
-      prioridad: ordenForm.prioridad, estado: "pendiente",
-      solicitadoPor: { rol: "agronomo", id: session.id, nombre: session.nombre },
-    });
-    setOrdenForm({ descripcion: "", cantidad: "", justificacion: "", prioridad: "media" });
-    alert("Orden de compra enviada al administrador.");
-  };
-
-  const misOrdenes = (data.compras || []).filter(c => c.solicitadoPor && c.solicitadoPor.id === session.id)
-    .sort((a, b) => b.fecha.localeCompare(a.fecha));
-
   return (
     <div>
       <div className="top-bar">
         <button className="btn-ghost" onClick={onClose}>‹</button>
-        <h2>Insumos 🛒</h2>
-      </div>
-      <div className="tabs-pill">
-        {[["comprar", "Comprar"], ["ordenar", "Pedir compra"], ["ordenes", "Mis órdenes"]].map(([t, l]) => (
-          <button key={t} className={`tab-pill${tab === t ? " active" : ""}`} onClick={() => setTab(t)}>{l}</button>
-        ))}
+        <h2>Registrar compra de insumo 📦</h2>
       </div>
       <div className="section-pad">
-        {tab === "comprar" && (
-          <div className="card ab">
-            <div className="card-title">Registrar compra de insumo</div>
-            <div className="text-xs text-muted mb-3">Lo que compres entra al inventario y su costo se registra en finanzas como egreso.</div>
-            <div className="form-group"><label className="form-label">Insumo</label>
-              <select className="inp" value={compraForm.insumoId} onChange={e => setCompraForm(f => ({ ...f, insumoId: e.target.value }))}>
-                <option value="">Seleccionar...</option>
-                {data.inventario.map(i => <option key={i.id} value={i.id}>{i.emoji} {i.nombre} ({fmtN(i.existencia)} {i.unidad})</option>)}
-                <option value="__nuevo__">➕ Insumo nuevo (no está en la lista)</option>
-              </select>
-            </div>
-            {compraForm.insumoId === "__nuevo__" && (
-              <>
-                <div className="form-group"><label className="form-label">Nombre del nuevo insumo</label><input className="inp" value={compraForm.nuevoNombre} onChange={e => setCompraForm(f => ({ ...f, nuevoNombre: e.target.value }))} /></div>
-                <div className="inp-row">
-                  <div className="form-group" style={{ flex: 1 }}><label className="form-label">Categoría</label>
-                    <select className="inp" value={compraForm.cat} onChange={e => setCompraForm(f => ({ ...f, cat: e.target.value }))}>
-                      {["fertilizante", "semilla", "agroquimico", "combustible", "herramienta", "otro"].map(c => <option key={c}>{c}</option>)}
-                    </select>
-                  </div>
-                  <div className="form-group" style={{ flex: 1 }}><label className="form-label">Unidad</label>
-                    <select className="inp" value={compraForm.unidad} onChange={e => setCompraForm(f => ({ ...f, unidad: e.target.value }))}>
-                      {["kg", "L", "ton", "saco", "pieza", "caja"].map(u => <option key={u}>{u}</option>)}
-                    </select>
-                  </div>
-                </div>
-              </>
-            )}
-            <div className="inp-row">
-              <div className="form-group" style={{ flex: 1 }}><label className="form-label">Cantidad</label><input type="number" className="inp" value={compraForm.cantidad} onChange={e => setCompraForm(f => ({ ...f, cantidad: e.target.value }))} /></div>
-              <div className="form-group" style={{ flex: 1 }}><label className="form-label">Costo total ($)</label><input type="number" className="inp" value={compraForm.costoTotal} onChange={e => setCompraForm(f => ({ ...f, costoTotal: e.target.value }))} /></div>
-            </div>
-            <div className="form-group"><label className="form-label">Proveedor</label><input className="inp" value={compraForm.proveedor} onChange={e => setCompraForm(f => ({ ...f, proveedor: e.target.value }))} /></div>
-            <div className="form-group"><label className="form-label">Fecha</label><input type="date" className="inp" value={compraForm.fecha} onChange={e => setCompraForm(f => ({ ...f, fecha: e.target.value }))} max={today()} /></div>
-            <button className="btn btn-accent" onClick={registrarCompra}>Registrar compra</button>
+        <div className="card ab">
+          <div className="card-title">Compra ya realizada</div>
+          <div className="text-xs text-muted mb-3">Registra aquí un insumo que YA compraste. Entra al inventario y su costo se refleja en finanzas como egreso. Si lo que quieres es <b>pedir</b> una compra para que la cotice finanzas, usa "Solicitar compra".</div>
+          <div className="form-group"><label className="form-label">Insumo</label>
+            <select className="inp" value={compraForm.insumoId} onChange={e => setCompraForm(f => ({ ...f, insumoId: e.target.value }))}>
+              <option value="">Seleccionar...</option>
+              {data.inventario.map(i => <option key={i.id} value={i.id}>{i.emoji} {i.nombre} ({fmtN(i.existencia)} {i.unidad})</option>)}
+              <option value="__nuevo__">➕ Insumo nuevo (no está en la lista)</option>
+            </select>
           </div>
-        )}
-        {tab === "ordenar" && (
-          <div className="card ab">
-            <div className="card-title">Pedir compra al administrador</div>
-            <div className="text-xs text-muted mb-3">Envía una orden para que el administrador compre un insumo que se necesita.</div>
-            <div className="form-group"><label className="form-label">¿Qué insumo se necesita?</label><input className="inp" placeholder="Ej: Nitrato de calcio" value={ordenForm.descripcion} onChange={e => setOrdenForm(f => ({ ...f, descripcion: e.target.value }))} /></div>
-            <div className="form-group"><label className="form-label">Cantidad estimada</label><input className="inp" placeholder="Ej: 500 kg" value={ordenForm.cantidad} onChange={e => setOrdenForm(f => ({ ...f, cantidad: e.target.value }))} /></div>
-            <div className="form-group"><label className="form-label">Justificación</label><textarea className="inp" placeholder="¿Para qué se necesita?" value={ordenForm.justificacion} onChange={e => setOrdenForm(f => ({ ...f, justificacion: e.target.value }))} /></div>
-            <div className="form-group"><label className="form-label">Prioridad</label>
-              <select className="inp" value={ordenForm.prioridad} onChange={e => setOrdenForm(f => ({ ...f, prioridad: e.target.value }))}>
-                <option value="alta">Alta</option><option value="media">Media</option><option value="baja">Baja</option>
-              </select>
-            </div>
-            <button className="btn btn-accent" onClick={enviarOrden}>Enviar orden de compra</button>
-          </div>
-        )}
-        {tab === "ordenes" && (
-          <>
-            {misOrdenes.length === 0 && <div className="text-muted text-sm" style={{ textAlign: "center", padding: "32px 0" }}>Sin órdenes enviadas</div>}
-            {misOrdenes.map(o => (
-              <div key={o.id} className="card">
-                <div className="flex-b mb-1">
-                  <div className="font-bold">{o.descripcion}</div>
-                  <span className={`badge badge-${o.estado === "comprada" ? "green" : o.estado === "rechazada" ? "red" : "gold"}`}>{o.estado}</span>
+          {compraForm.insumoId === "__nuevo__" && (
+            <>
+              <div className="form-group"><label className="form-label">Nombre del nuevo insumo</label><input className="inp" value={compraForm.nuevoNombre} onChange={e => setCompraForm(f => ({ ...f, nuevoNombre: e.target.value }))} /></div>
+              <div className="inp-row">
+                <div className="form-group" style={{ flex: 1 }}><label className="form-label">Categoría</label>
+                  <select className="inp" value={compraForm.cat} onChange={e => setCompraForm(f => ({ ...f, cat: e.target.value }))}>
+                    {["fertilizante", "semilla", "agroquimico", "combustible", "herramienta", "otro"].map(c => <option key={c}>{c}</option>)}
+                  </select>
                 </div>
-                <div className="text-sm text-muted">{o.cantidad || "—"} · {o.fecha} · prioridad {o.prioridad}</div>
-                {o.justificacion && <div className="text-sm" style={{ marginTop: 6 }}>{o.justificacion}</div>}
-                {o.estado === "pendiente" && <button className="btn btn-danger btn-sm mt-2" onClick={() => del("compras", o.id)}>Cancelar orden</button>}
+                <div className="form-group" style={{ flex: 1 }}><label className="form-label">Unidad</label>
+                  <select className="inp" value={compraForm.unidad} onChange={e => setCompraForm(f => ({ ...f, unidad: e.target.value }))}>
+                    {["kg", "L", "ton", "saco", "pieza", "caja"].map(u => <option key={u}>{u}</option>)}
+                  </select>
+                </div>
               </div>
-            ))}
-          </>
-        )}
+            </>
+          )}
+          <div className="inp-row">
+            <div className="form-group" style={{ flex: 1 }}><label className="form-label">Cantidad</label><input type="number" className="inp" value={compraForm.cantidad} onChange={e => setCompraForm(f => ({ ...f, cantidad: e.target.value }))} /></div>
+            <div className="form-group" style={{ flex: 1 }}><label className="form-label">Costo total ($)</label><input type="number" className="inp" value={compraForm.costoTotal} onChange={e => setCompraForm(f => ({ ...f, costoTotal: e.target.value }))} /></div>
+          </div>
+          <div className="form-group"><label className="form-label">Proveedor</label><input className="inp" value={compraForm.proveedor} onChange={e => setCompraForm(f => ({ ...f, proveedor: e.target.value }))} /></div>
+          <div className="form-group"><label className="form-label">Fecha</label><input type="date" className="inp" value={compraForm.fecha} onChange={e => setCompraForm(f => ({ ...f, fecha: e.target.value }))} max={today()} /></div>
+          <button className="btn btn-accent" onClick={registrarCompra}>Registrar compra</button>
+        </div>
       </div>
     </div>
   );
@@ -9657,6 +9633,76 @@ function PanelOperacion({ data, onClose, onVerParcela }) {
             </div>
           ))}
         </div>
+      </div>
+    </div>
+  );
+}
+
+/* ════════════ ADMIN: MÁS FUNCIONES ════════════ */
+/* Menú que agrupa todos los accesos del admin a funciones de otros perfiles,
+   para que su pantalla de inicio no se sature. El admin puede TODO. */
+function AdminMasFunciones({ onNav, onClose }) {
+  const grupos = [
+    {
+      titulo: "Agronomía",
+      items: [
+        { page: "indicaciones", icon: "📋", label: "Indicaciones", sub: "Mandar al personal" },
+        { page: "aplicaciones", icon: "🧪", label: "Aplicaciones", sub: "Fertirriego / tratamientos" },
+        { page: "compras-insumos", icon: "🛒", label: "Comprar insumos", sub: "Pedidos de insumos" },
+        { page: "calendario", icon: "🌱", label: "Calendario", sub: "Siembras y avance por fase" },
+      ],
+    },
+    {
+      titulo: "Operación de campo",
+      items: [
+        { page: "tareas", icon: "✅", label: "Tareas", sub: "Asignar y dar seguimiento" },
+        { page: "personal", icon: "👷", label: "Personal", sub: "Gestión de trabajadores" },
+        { page: "asistencia", icon: "📋", label: "Asistencia", sub: "Registro de jornadas" },
+        { page: "registro-masivo", icon: "📝", label: "Registro masivo", sub: "Varias actividades de una vez" },
+      ],
+    },
+    {
+      titulo: "Finanzas",
+      items: [
+        { page: "caja", icon: "💵", label: "Caja chica", sub: "Gastos y movimientos" },
+        { page: "deudas", icon: "🏦", label: "Deudas", sub: "Créditos y pagos" },
+        { page: "proyeccion", icon: "📅", label: "Proyección semanal", sub: "Qué se va a necesitar" },
+      ],
+    },
+    {
+      titulo: "Vistas del personal (para revisar)",
+      items: [
+        { page: "mis", icon: "📖", label: "Mis actividades", sub: "Como lo ve un trabajador" },
+        { page: "compras", icon: "🧾", label: "Registrar compra", sub: "Como lo ve un trabajador" },
+        { page: "reporte", icon: "⚠️", label: "Reportar incidencia", sub: "Como lo ve el personal" },
+      ],
+    },
+  ];
+
+  return (
+    <div>
+      <div className="top-bar">
+        {onClose && <button className="btn-ghost" onClick={onClose}>‹</button>}
+        <h2>Más funciones 🧰</h2>
+      </div>
+      <div className="section-pad">
+        <div className="text-xs text-muted mb-3" style={{ paddingLeft: 4 }}>
+          Como administrador tienes acceso a todas las funciones de la app, agrupadas aquí.
+        </div>
+        {grupos.map((g, i) => (
+          <div key={i} style={{ marginBottom: 18 }}>
+            <div className="card-title" style={{ paddingLeft: 4 }}>{g.titulo}</div>
+            <div className="option-grid">
+              {g.items.map(it => (
+                <div key={it.page} className="option-card" onClick={() => onNav(it.page)}>
+                  <span className="oc-icon">{it.icon}</span>
+                  <span className="oc-label">{it.label}</span>
+                  <span className="oc-sub">{it.sub}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
