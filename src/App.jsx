@@ -1155,6 +1155,26 @@ function reporteSiembra(data, siembraId) {
 /* ──── Progreso de actividades de una siembra ──── */
 // Para cada etapa fenológica del cultivo, calcula el avance:
 // real (por superficie capturada o por existencia de actividades) vs lo esperado (por fecha).
+// Calcula las camas totales de una siembra.
+// Prioridad: si la siembra tiene camasTotal definido a mano, se usa ese.
+// Si no, camas = camasPorHa del cultivo × hectáreas de la parcela.
+// Devuelve { camasTotal, camasPorHa, hectareas, usaCamas }.
+function camasSiembra(data, si) {
+  if (!si) return { camasTotal: 0, camasPorHa: 0, hectareas: 0, usaCamas: false };
+  const cultivo = (data.cultivos || []).find(c => c.id === si.cultivoId);
+  const p = (data.parcelas || []).find(x => x.id === si.parcelaId);
+  const hectareas = p?.hectareas || 0;
+  // Total directo en la siembra tiene prioridad
+  if (si.camasTotal && parseFloat(si.camasTotal) > 0) {
+    return { camasTotal: parseFloat(si.camasTotal), camasPorHa: hectareas > 0 ? parseFloat(si.camasTotal) / hectareas : 0, hectareas, usaCamas: true };
+  }
+  const camasPorHa = parseFloat(cultivo?.camasPorHa) || 0;
+  if (camasPorHa > 0 && hectareas > 0) {
+    return { camasTotal: Math.round(camasPorHa * hectareas), camasPorHa, hectareas, usaCamas: true };
+  }
+  return { camasTotal: 0, camasPorHa, hectareas, usaCamas: false };
+}
+
 function progresoSiembra(data, siembraId) {
   const si = (data.siembras || []).find(s => s.id === siembraId);
   if (!si) return null;
@@ -6978,7 +6998,7 @@ function CalendarioCultivos({ data, add, upd, del, session, onClose }) {
         {reportarAvance && (
           <ReportarAvanceModal
             siembra={reportarAvance.siembra} etapa={reportarAvance.etapa} actual={reportarAvance.actual}
-            add={add} session={session} onClose={() => setReportarAvance(null)}
+            data={data} add={add} session={session} onClose={() => setReportarAvance(null)}
           />
         )}
       </div>
@@ -9445,19 +9465,32 @@ function BitacoraParcela({ data, add, del, parcelaId, session, onClose, embedded
 /* ════════════ MODAL: REPORTAR AVANCE DE FASE ════════════ */
 /* Permite registrar a mano el % y estado de una fase fenológica
    (lo que se ve en campo: emergencia, brotación, etc.). */
-function ReportarAvanceModal({ siembra, etapa, actual, add, session, onClose }) {
+function ReportarAvanceModal({ siembra, etapa, actual, data, add, session, onClose }) {
+  const camas = camasSiembra(data, siembra);
+  const [modo, setModo] = useState(camas.usaCamas ? "camas" : "porcentaje"); // camas | porcentaje
   const [porcentaje, setPorcentaje] = useState(actual?.porcentaje != null ? String(actual.porcentaje) : "");
+  const [camasHechas, setCamasHechas] = useState(actual?.camasHechas != null ? String(actual.camasHechas) : "");
   const [estado, setEstado] = useState(actual?.estado || "en_proceso");
   const [nota, setNota] = useState("");
   const [fecha, setFecha] = useState(today());
 
+  // Calcular el % efectivo según el modo
+  const camasNum = parseFloat(camasHechas) || 0;
+  const pctDesdeCamas = camas.camasTotal > 0 ? Math.min(100, (camasNum / camas.camasTotal) * 100) : 0;
+  const pctEfectivo = modo === "camas" ? pctDesdeCamas : (parseFloat(porcentaje) || 0);
+  // Equivalencias para mostrar
+  const haEquivalente = camas.hectareas > 0 ? (pctEfectivo / 100) * camas.hectareas : 0;
+  const camasEquivalente = camas.camasTotal > 0 ? Math.round((pctEfectivo / 100) * camas.camasTotal) : 0;
+
   const guardar = () => {
-    const pct = Math.max(0, Math.min(100, parseFloat(porcentaje) || 0));
+    const pct = Math.max(0, Math.min(100, pctEfectivo));
     add("avances_fase", {
       siembraId: siembra.id,
       parcelaId: siembra.parcelaId,
       etapa,
-      porcentaje: pct,
+      porcentaje: Math.round(pct * 10) / 10,
+      camasHechas: modo === "camas" ? camasNum : camasEquivalente,
+      camasTotal: camas.camasTotal,
       estado,
       nota: nota.trim(),
       fecha: fecha || today(),
@@ -9477,15 +9510,39 @@ function ReportarAvanceModal({ siembra, etapa, actual, add, session, onClose }) 
         <div className="card" style={{ background: "rgba(126,200,50,.06)", border: "1px solid rgba(126,200,50,.2)" }}>
           <div className="font-bold">{etapa}</div>
           <div className="text-sm text-muted mt-1">{nombreSiembra(siembra)}</div>
+          {camas.usaCamas && <div className="text-xs mt-1" style={{ color: "var(--accent)" }}>Total: {fmtN(camas.camasTotal)} camas · {fmtN(camas.hectareas)} ha</div>}
         </div>
 
-        <div className="form-group" style={{ marginTop: 12 }}>
-          <label className="form-label">¿Qué tanto va? ({porcentaje || 0}%)</label>
-          <input type="range" min="0" max="100" step="5" value={porcentaje || 0}
-                 onChange={e => setPorcentaje(e.target.value)} style={{ width: "100%" }} />
-          <div className="flex-b text-xs text-muted"><span>0%</span><span>50%</span><span>100%</span></div>
-          <input type="number" className="inp mt-2" min="0" max="100" placeholder="O escribe el %"
-                 value={porcentaje} onChange={e => setPorcentaje(e.target.value)} />
+        {camas.usaCamas && (
+          <div className="tabs-pill" style={{ marginTop: 12 }}>
+            <button className={`tab-pill${modo === "camas" ? " active" : ""}`} onClick={() => setModo("camas")}>Por camas</button>
+            <button className={`tab-pill${modo === "porcentaje" ? " active" : ""}`} onClick={() => setModo("porcentaje")}>Por %</button>
+          </div>
+        )}
+
+        {modo === "camas" && camas.usaCamas ? (
+          <div className="form-group" style={{ marginTop: 12 }}>
+            <label className="form-label">¿Cuántas camas se trabajaron?</label>
+            <input type="number" className="inp" min="0" max={camas.camasTotal} placeholder="Ej: 60"
+                   value={camasHechas} onChange={e => setCamasHechas(e.target.value)} />
+            <div className="text-xs text-muted mt-1">de {fmtN(camas.camasTotal)} camas totales</div>
+          </div>
+        ) : (
+          <div className="form-group" style={{ marginTop: 12 }}>
+            <label className="form-label">¿Qué tanto va? ({Math.round(pctEfectivo)}%)</label>
+            <input type="range" min="0" max="100" step="5" value={porcentaje || 0}
+                   onChange={e => setPorcentaje(e.target.value)} style={{ width: "100%" }} />
+            <div className="flex-b text-xs text-muted"><span>0%</span><span>50%</span><span>100%</span></div>
+            <input type="number" className="inp mt-2" min="0" max="100" placeholder="O escribe el %"
+                   value={porcentaje} onChange={e => setPorcentaje(e.target.value)} />
+          </div>
+        )}
+
+        {/* Equivalencias en las tres unidades */}
+        <div className="card" style={{ background: "var(--surface2)", padding: "10px 14px" }}>
+          <div className="flex-b text-sm"><span className="text-muted">Avance</span><span className="font-bold">{Math.round(pctEfectivo)}%</span></div>
+          {camas.usaCamas && <div className="flex-b text-sm" style={{ marginTop: 3 }}><span className="text-muted">Camas</span><span className="font-bold">{fmtN(camasEquivalente)} / {fmtN(camas.camasTotal)}</span></div>}
+          {camas.hectareas > 0 && <div className="flex-b text-sm" style={{ marginTop: 3 }}><span className="text-muted">Hectáreas</span><span className="font-bold">{haEquivalente.toFixed(2)} / {fmtN(camas.hectareas)} ha</span></div>}
         </div>
 
         <div className="form-group">
@@ -9493,7 +9550,11 @@ function ReportarAvanceModal({ siembra, etapa, actual, add, session, onClose }) 
           <div className="gap-row">
             {[["pendiente", "No iniciada"], ["en_proceso", "En proceso"], ["completada", "Completada"]].map(([v, l]) => (
               <button key={v} className={`btn btn-sm ${estado === v ? "btn-accent" : "btn-outline"}`} style={{ flex: 1 }}
-                      onClick={() => { setEstado(v); if (v === "completada") setPorcentaje("100"); if (v === "pendiente") setPorcentaje("0"); }}>
+                      onClick={() => {
+                        setEstado(v);
+                        if (v === "completada") { setPorcentaje("100"); setCamasHechas(String(camas.camasTotal)); }
+                        if (v === "pendiente") { setPorcentaje("0"); setCamasHechas("0"); }
+                      }}>
                 {l}
               </button>
             ))}

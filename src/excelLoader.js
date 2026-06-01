@@ -63,11 +63,11 @@ export const HOJAS = {
     ],
   },
   Cultivos: {
-    columnas: ["Nombre", "Emoji", "Duración total (días)", "Unidad de cosecha"],
+    columnas: ["Nombre", "Emoji", "Duración total (días)", "Unidad de cosecha", "Camas por hectárea"],
     ejemplos: [
-      ["Maíz",  "🌽", 150, "toneladas"],
-      ["Ajo",   "🧄", 250, "kg"],
-      ["Chile", "🌶️", 180, "cajas"],
+      ["Maíz",  "🌽", 150, "toneladas", ""],
+      ["Ajo",   "🧄", 250, "kg", 40],
+      ["Chile", "🌶️", 180, "cajas", 25],
     ],
   },
   Fenología: {
@@ -114,7 +114,8 @@ const INSTRUCCIONES = [
   [""],
   ["• Proveedores:  proveedores de insumos."],
   [""],
-  ["• Cultivos:     catálogo de cultivos con su emoji, duración total y unidad de cosecha."],
+  ["• Cultivos:     catálogo de cultivos con su emoji, duración total, unidad de cosecha y camas por hectárea."],
+  ["                'Camas por hectárea' es opcional: déjalo vacío si ese cultivo no se maneja por camas."],
   [""],
   ["• Fenología:    etapas de cada cultivo (días de inicio y fin de cada etapa)."],
   ["                Por cada cultivo, agrega tantas filas como etapas tenga."],
@@ -310,6 +311,7 @@ export function excelAColecciones(datosExcel) {
       emoji: (f["Emoji"] || "🌱").toString().trim() || "🌱",
       duracionDias: parseInt(f["Duración total (días)"]) || 0,
       unidadCosecha: (f["Unidad de cosecha"] || "kg").toString().trim(),
+      camasPorHa: parseFloat(f["Camas por hectárea"]) || 0,
       fenologia: fenologiaPorCultivo[nombre] || [],
     });
   });
