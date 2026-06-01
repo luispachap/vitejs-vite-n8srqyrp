@@ -1790,7 +1790,7 @@ function AppInner() {
               {page === "respaldo" && <RespaldoDatos data={data} setData={setData} onClose={() => setPage("home")} />}
               {page === "panel-financiero" && <PanelFinanciero data={data} onClose={() => setPage("home")} />}
               {page === "subir-nube" && <SubirCatalogos data={data} setData={setData} session={session} onClose={() => setPage("home")} />}
-              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
+              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
               {page === "operacion" && <PanelOperacion data={data} onClose={() => setPage("home")} onVerParcela={() => setPage("calendario")} />}
               {/* Funciones de gestión heredadas de otros perfiles (el admin puede todo) */}
               {page === "indicaciones" && <AgronomoIndicaciones data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
@@ -1817,7 +1817,7 @@ function AppInner() {
               {page === "cosechas" && <GestionCosechas data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
               {page === "asistencia" && <GestionAsistencia data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
               {page === "aprobacion-externos" && <AprobacionExternos data={data} upd={upd} onBack={() => setPage("home")} />}
-              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
+              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
               {page === "operacion" && <PanelOperacion data={data} onClose={() => setPage("home")} />}
             </>}
             {isTrab && <>
@@ -1825,7 +1825,7 @@ function AppInner() {
               {page === "mis" && <TrabHistorial data={data} add={add} upd={upd} session={session} onLogout={cerrarSesion} />}
               {page === "compras" && <TrabCompras data={data} add={add} setInv={setInv} session={session} online={online} onLogout={cerrarSesion} />}
               {page === "reporte" && <TrabReporte data={data} add={add} session={session} onLogout={cerrarSesion} />}
-              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
+              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
             </>}
             {isCuad && <>
               {page === "home" && <CuadrillaReg data={data} add={add} upd={upd} setInv={setInv} session={session} online={online} onLogout={cerrarSesion} />}
@@ -1845,7 +1845,7 @@ function AppInner() {
               {page === "indicaciones" && <AgronomoIndicaciones data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
               {page === "compras-insumos" && <AgronomoCompras data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
               {page === "reporte" && <TrabReporte data={data} add={add} session={session} onLogout={cerrarSesion} />}
-              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
+              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
               {page === "operacion" && <PanelOperacion data={data} onClose={() => setPage("home")} />}
             </>}
             {isDueno && <>
@@ -1861,7 +1861,7 @@ function AppInner() {
               {page === "proyeccion" && <ProyeccionSemanal data={data} onClose={() => setPage("home")} />}
               {page === "deudas" && <GestionDeudas data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
               {page === "contabilidad" && <AdminContabilidad data={data} add={add} upd={upd} del={del} setInv={setInv} />}
-              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
+              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
               {page === "operacion" && <PanelOperacion data={data} onClose={() => setPage("home")} />}
             </>}
           </ErrorBoundary>
@@ -9056,12 +9056,14 @@ function CompletarIndicacionModal({ tarea, data, add, upd, setInv, session, onCl
 /* ════════════ SOLICITUDES DE COMPRA ════════════ */
 /* Cualquiera crea solicitudes itemizadas. Finanzas/admin/encargados las gestionan.
    Botón de WhatsApp para cotizar con proveedores. */
-function SolicitudesCompra({ data, add, upd, del, session, onClose }) {
+function SolicitudesCompra({ data, add, upd, del, setInv, session, onClose }) {
   const rol = session.role;
   const puedeGestionar = ["admin", "finanzas", "encargado", "dueno"].includes(rol);
+  const puedeConfirmarCompra = ["admin", "finanzas"].includes(rol);
   const [showForm, setShowForm] = useState(false);
   const [verSolic, setVerSolic] = useState(null); // solicitud abierta en detalle
   const [filtro, setFiltro] = useState("todas"); // todas | pendiente | cotizando | comprada
+  const [confirmarCompra, setConfirmarCompra] = useState(null); // solicitud que se está convirtiendo en compra
 
   // Formulario de nueva solicitud
   const F0 = { paraCuando: "", notas: "", items: [] };
@@ -9173,16 +9175,34 @@ function SolicitudesCompra({ data, add, upd, del, session, onClose }) {
                 </a>
               </div>
 
+              {puedeConfirmarCompra && s.estado !== "comprada" && s.estado !== "cancelada" && (
+                <div className="card" style={{ background: "rgba(126,200,50,.06)", border: "1px solid rgba(126,200,50,.25)" }}>
+                  <div className="card-title">✅ Registrar la compra</div>
+                  <div className="text-sm text-muted mb-3">Cuando ya compraste estos productos, regístralo aquí: entrarán al inventario y se registrará el gasto en finanzas, todo de una vez.</div>
+                  <button className="btn btn-accent" style={{ width: "100%" }} onClick={() => setConfirmarCompra(s)}>
+                    Confirmar compra y mover inventario
+                  </button>
+                </div>
+              )}
+
+              {s.estado === "comprada" && (
+                <div className="card" style={{ background: "rgba(126,200,50,.08)" }}>
+                  <div className="text-sm" style={{ color: "var(--safe)", fontWeight: 700 }}>✓ Compra registrada</div>
+                  <div className="text-xs text-muted mt-1">Los productos entraron al inventario y el gasto quedó en finanzas.</div>
+                </div>
+              )}
+
               <div className="card">
                 <div className="card-title">Cambiar estado</div>
                 <div className="gap-row" style={{ flexWrap: "wrap" }}>
-                  {["pendiente", "cotizando", "comprada", "cancelada"].map(est => (
+                  {["pendiente", "cotizando", "cancelada"].map(est => (
                     <button key={est} className={`btn btn-sm ${s.estado === est ? "btn-accent" : "btn-outline"}`}
                             style={{ flex: "1 1 45%" }} onClick={() => cambiarEstado(s, est)}>
                       {estadoLabel(est)}
                     </button>
                   ))}
                 </div>
+                <div className="text-xs text-muted mt-2">El estado "comprada" se asigna al confirmar la compra arriba.</div>
               </div>
 
               <button className="btn btn-danger" onClick={() => { if (confirm("¿Borrar esta solicitud?")) { del("solicitudes_compra", s.id); setVerSolic(null); } }}>
@@ -9191,6 +9211,13 @@ function SolicitudesCompra({ data, add, upd, del, session, onClose }) {
             </>
           )}
         </div>
+        {confirmarCompra && (
+          <ConfirmarCompraModal
+            solicitud={confirmarCompra} data={data} add={add} upd={upd} setInv={setInv} session={session}
+            onClose={() => setConfirmarCompra(null)}
+            onHecho={() => { setConfirmarCompra(null); }}
+          />
+        )}
       </div>
     );
   }
@@ -9310,6 +9337,153 @@ function SolicitudesCompra({ data, add, upd, del, session, onClose }) {
     </div>
   );
 }
+
+/* ════════════ MODAL: CONFIRMAR COMPRA DE UNA SOLICITUD ════════════ */
+/* Convierte una solicitud en compra real: cada item entra al inventario
+   (subiendo existencia y recalculando costo promedio) y genera su egreso
+   en finanzas. La solicitud queda marcada como "comprada". */
+function ConfirmarCompraModal({ solicitud, data, add, upd, setInv, session, onClose, onHecho }) {
+  // Pre-llenar cada item de la solicitud con: insumo destino, cantidad y costo.
+  // Si el item ya venía ligado a un insumo del inventario, se respeta.
+  const [lineas, setLineas] = useState(() => (solicitud.items || []).map(it => {
+    // Intentar adivinar el insumo por nombre si no trae insumoId
+    let insumoId = it.insumoId || "";
+    if (!insumoId) {
+      const m = (data.inventario || []).find(i => i.nombre.toLowerCase() === (it.nombre || "").toLowerCase());
+      if (m) insumoId = m.id;
+    }
+    return {
+      idLinea: it.id || `l${Math.random()}`,
+      insumoId: insumoId || "__nuevo__",
+      nombreNuevo: insumoId ? "" : (it.nombre || ""),
+      cat: "fertilizante",
+      unidad: it.unidad || "kg",
+      cantidad: it.cantidad || "",
+      costoTotal: "",
+    };
+  }));
+  const [proveedor, setProveedor] = useState("");
+  const [fecha, setFecha] = useState(today());
+  const [guardando, setGuardando] = useState(false);
+
+  const setLinea = (idLinea, campo, valor) => setLineas(ls => ls.map(l => l.idLinea === idLinea ? { ...l, [campo]: valor } : l));
+
+  const totalCompra = lineas.reduce((s, l) => s + (parseFloat(l.costoTotal) || 0), 0);
+
+  const confirmar = () => {
+    // Validar
+    for (const l of lineas) {
+      const cant = parseFloat(l.cantidad) || 0;
+      if (cant <= 0) { alert("Cada producto necesita una cantidad mayor a cero."); return; }
+      if (l.insumoId === "__nuevo__" && !l.nombreNuevo.trim()) { alert("Escribe el nombre del insumo nuevo."); return; }
+    }
+    if (guardando) return;
+    setGuardando(true);
+
+    lineas.forEach(l => {
+      const cant = parseFloat(l.cantidad) || 0;
+      const costo = parseFloat(l.costoTotal) || 0;
+      let insumoId = l.insumoId;
+      let nombreInsumo = "";
+
+      if (insumoId === "__nuevo__") {
+        const nuevo = add("inventario", {
+          nombre: l.nombreNuevo.trim(), cat: l.cat, unidad: l.unidad,
+          existencia: cant, costo_unit: cant > 0 ? costo / cant : 0, minimo: 0, emoji: "🧪",
+        });
+        insumoId = nuevo.id; nombreInsumo = l.nombreNuevo.trim();
+      } else {
+        const inv = (data.inventario || []).find(i => i.id === insumoId);
+        if (!inv) return;
+        nombreInsumo = inv.nombre;
+        const nuevaExist = (inv.existencia || 0) + cant;
+        const nuevoCostoProm = nuevaExist > 0 ? ((inv.existencia || 0) * (inv.costo_unit || 0) + costo) / nuevaExist : 0;
+        upd("inventario", { ...inv, existencia: nuevaExist, costo_unit: nuevoCostoProm });
+      }
+
+      // Egreso por cada item (trazabilidad fina en finanzas)
+      if (costo > 0) {
+        add("egresos", {
+          fecha, concepto: `Compra: ${nombreInsumo}`, categoria: "insumos",
+          monto: costo, proveedor,
+          solicitudId: solicitud.id,
+          registradoPor: { rol: session.role, id: session.id, nombre: session.nombre || "" },
+        });
+      }
+      // Registro de entrada de inventario
+      add("entradas_inv", {
+        fecha, insumoId, cantidad: cant, costo_total: costo, proveedor, factura: "",
+        concepto: "Compra desde solicitud",
+      });
+    });
+
+    // Marcar la solicitud como comprada
+    upd("solicitudes_compra", {
+      ...solicitud, estado: "comprada",
+      compraInfo: { fecha, proveedor, total: totalCompra, confirmadaPor: { id: session.id, nombre: session.nombre || "" } },
+    });
+
+    alert("Compra registrada: los productos entraron al inventario y el gasto quedó en finanzas.");
+    onHecho && onHecho();
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-sheet" onClick={e => e.stopPropagation()} style={{ maxHeight: "90vh", overflowY: "auto" }}>
+        <div className="flex-b mb-3">
+          <h3 style={{ margin: 0, fontSize: 18 }}>Confirmar compra</h3>
+          <button className="btn-ghost" onClick={onClose} style={{ fontSize: 20 }}>✕</button>
+        </div>
+        <div className="text-sm text-muted mb-3">Revisa y ajusta lo que realmente se compró. Al confirmar, entra al inventario y se registra el gasto.</div>
+
+        {lineas.map((l, idx) => {
+          const itemOrig = (solicitud.items || [])[idx];
+          return (
+            <div key={l.idLinea} className="card" style={{ padding: "12px 14px" }}>
+              <div className="font-bold text-sm mb-2">{itemOrig?.nombre || `Producto ${idx + 1}`}</div>
+              <div className="form-group">
+                <label className="form-label">¿A qué insumo del inventario?</label>
+                <select className="inp" value={l.insumoId} onChange={e => setLinea(l.idLinea, "insumoId", e.target.value)}>
+                  {(data.inventario || []).map(i => <option key={i.id} value={i.id}>{i.emoji || "📦"} {i.nombre}</option>)}
+                  <option value="__nuevo__">➕ Insumo nuevo</option>
+                </select>
+              </div>
+              {l.insumoId === "__nuevo__" && (
+                <div className="inp-row">
+                  <div className="form-group" style={{ flex: 2 }}><label className="form-label">Nombre nuevo</label><input className="inp" value={l.nombreNuevo} onChange={e => setLinea(l.idLinea, "nombreNuevo", e.target.value)} /></div>
+                  <div className="form-group" style={{ flex: 1 }}><label className="form-label">Unidad</label>
+                    <select className="inp" value={l.unidad} onChange={e => setLinea(l.idLinea, "unidad", e.target.value)}>
+                      {["kg", "L", "ton", "saco", "pieza", "caja"].map(u => <option key={u}>{u}</option>)}
+                    </select>
+                  </div>
+                </div>
+              )}
+              <div className="inp-row">
+                <div className="form-group" style={{ flex: 1 }}><label className="form-label">Cantidad</label><input type="number" className="inp" value={l.cantidad} onChange={e => setLinea(l.idLinea, "cantidad", e.target.value)} /></div>
+                <div className="form-group" style={{ flex: 1 }}><label className="form-label">Costo total ($)</label><input type="number" className="inp" value={l.costoTotal} onChange={e => setLinea(l.idLinea, "costoTotal", e.target.value)} /></div>
+              </div>
+            </div>
+          );
+        })}
+
+        <div className="inp-row">
+          <div className="form-group" style={{ flex: 1 }}><label className="form-label">Proveedor</label><input className="inp" value={proveedor} onChange={e => setProveedor(e.target.value)} /></div>
+          <div className="form-group" style={{ flex: 1 }}><label className="form-label">Fecha</label><input type="date" className="inp" value={fecha} onChange={e => setFecha(e.target.value)} max={today()} /></div>
+        </div>
+
+        <div className="card" style={{ background: "var(--surface2)", padding: "10px 14px" }}>
+          <div className="flex-b"><span className="font-bold">Total de la compra</span><span className="font-bold text-accent">{fmt(totalCompra)}</span></div>
+        </div>
+
+        <div className="gap-row" style={{ marginTop: 12 }}>
+          <button className="btn btn-outline" style={{ flex: 1 }} onClick={onClose}>Cancelar</button>
+          <button className="btn btn-accent" style={{ flex: 1.5 }} onClick={confirmar} disabled={guardando}>Confirmar e ingresar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 /* ════════════ BITÁCORA DE PARCELA ════════════ */
 /* Historial de notas de manejo por parcela. Tipos: observación, problema,
