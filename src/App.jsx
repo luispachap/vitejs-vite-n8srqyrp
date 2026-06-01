@@ -1322,10 +1322,15 @@ const TABLAS_NUBE = [
 function useOffline() {
   const [online, setOnline] = useState(typeof navigator !== "undefined" ? navigator.onLine : true);
   // Cola de operaciones pendientes de enviar a Supabase. Cada item:
-  //   { id, operacion: "upd"|"del", sec, payload, queuedAt }
+  //   { id, operacion: "upd"|"del", sec, payload, queuedAt, intentos }
   const [pending, setPending] = useLS("agro_pending_v7", []);
+  // Operaciones que fallaron muchas veces. NO se borran: se apartan aquí para
+  // no atascar la cola, pero quedan disponibles para reintentar manualmente.
+  // Así NUNCA se pierde un dato en silencio.
+  const [fallidas, setFallidas] = useLS("agro_fallidas_v1", []);
   const [justSynced, setJustSynced] = useState(false);
-  const [sincronizandoCola, setSincronizandoCola] = useState(false);
+  const procesandoRef = useRef(false);
+  const MAX_INTENTOS = 5; // tras 5 fallos seguidos, se aparta a "fallidas" (no se borra)
 
   useEffect(() => {
     const up = () => setOnline(true), dn = () => setOnline(false);
@@ -1338,51 +1343,71 @@ function useOffline() {
   const queue = useCallback((operacion, sec, payload) => {
     setPending(p => [...p, {
       id: `q${Date.now()}${Math.floor(Math.random() * 1000)}`,
-      operacion, sec, payload, queuedAt: Date.now(),
+      operacion, sec, payload, queuedAt: Date.now(), intentos: 0,
     }]);
   }, [setPending]);
 
   // Procesar la cola: intenta enviar cada operación pendiente a Supabase.
-  // Solo quita de la cola las que se enviaron con éxito.
+  // - Las que se envían con éxito se quitan.
+  // - Las que fallan suman un intento; tras MAX_INTENTOS se APARTAN a "fallidas"
+  //   (no se borran) para que la cola no se atasque, pero sin perder nada.
+  // Usa un ref como candado para no reentrar (evita disparos dobles de React).
   const procesarCola = useCallback(async () => {
-    if (!supabaseListo || !online || sincronizandoCola) return;
-    setPending(actuales => {
-      if (actuales.length === 0) return actuales;
-      // Disparar el envío en segundo plano (no podemos hacer async dentro de setPending,
-      // así que tomamos una copia y procesamos afuera).
-      (async () => {
-        setSincronizandoCola(true);
-        const exitosas = new Set();
-        for (const op of actuales) {
-          try {
-            if (op.operacion === "del") await borrarRegistro(op.sec, op.payload);
-            else await guardarRegistro(op.sec, op.payload);
-            exitosas.add(op.id);
-          } catch (e) {
-            // Si una falla, la dejamos en la cola para el próximo intento.
-            console.warn(`Cola: no se pudo enviar ${op.operacion} en ${op.sec}:`, e?.message);
-          }
-        }
-        if (exitosas.size > 0) {
-          setPending(p => p.filter(op => !exitosas.has(op.id)));
-          setJustSynced(true);
-          setTimeout(() => setJustSynced(false), 4000);
-        }
-        setSincronizandoCola(false);
-      })();
-      return actuales; // no cambiamos la cola aquí; se filtra arriba al terminar
-    });
-  }, [online, sincronizandoCola, setPending]);
+    if (!supabaseListo || !online || procesandoRef.current) return;
+    let actuales = [];
+    setPending(p => { actuales = p; return p; });
+    if (!actuales || actuales.length === 0) return;
 
-  // Cuando vuelve la conexión y hay pendientes, procesar la cola.
+    procesandoRef.current = true;
+    const exitosas = new Set();
+    const nuevosIntentos = new Map(); // id -> intentos nuevos
+    const aApartar = [];             // operaciones que superaron el máximo
+    for (const op of actuales) {
+      try {
+        if (op.operacion === "del") await borrarRegistro(op.sec, op.payload);
+        else await guardarRegistro(op.sec, op.payload);
+        exitosas.add(op.id);
+      } catch (e) {
+        const intentos = (op.intentos || 0) + 1;
+        nuevosIntentos.set(op.id, intentos);
+        if (intentos >= MAX_INTENTOS) aApartar.push({ ...op, intentos, ultimoError: e?.message || "desconocido" });
+        console.warn(`Cola: falló ${op.operacion} en ${op.sec} (intento ${intentos}):`, e?.message);
+      }
+    }
+    const idsApartados = new Set(aApartar.map(o => o.id));
+    // Quitar de pending: las exitosas y las apartadas. A las demás, subir contador.
+    setPending(p => p
+      .filter(op => !exitosas.has(op.id) && !idsApartados.has(op.id))
+      .map(op => nuevosIntentos.has(op.id) ? { ...op, intentos: nuevosIntentos.get(op.id) } : op)
+    );
+    // Guardar las apartadas (sin perderlas)
+    if (aApartar.length > 0) setFallidas(f => [...f, ...aApartar]);
+    if (exitosas.size > 0) {
+      setJustSynced(true);
+      setTimeout(() => setJustSynced(false), 4000);
+    }
+    procesandoRef.current = false;
+  }, [online, setPending, setFallidas]);
+
+  // Reintentar las operaciones apartadas: las regresa a la cola con contador en cero.
+  const reintentarFallidas = useCallback(() => {
+    setFallidas(f => {
+      if (f.length > 0) {
+        setPending(p => [...p, ...f.map(op => ({ ...op, intentos: 0 }))]);
+      }
+      return [];
+    });
+  }, [setFallidas, setPending]);
+
+  // Cuando vuelve la conexión y hay pendientes, procesar la cola (una vez).
   useEffect(() => {
     if (online && pending.length > 0) {
       const t = setTimeout(() => { procesarCola(); }, 1500);
       return () => clearTimeout(t);
     }
-  }, [online, pending.length]);
+  }, [online, pending.length, procesarCola]);
 
-  return { online, pending, queue, justSynced, procesarCola };
+  return { online, pending, fallidas, queue, justSynced, procesarCola, reintentarFallidas };
 }
 
 /* ════════════ ERROR BOUNDARY ════════════ */
@@ -1535,7 +1560,7 @@ function AppInner() {
   const [page, setPageRaw] = useState("home");
   const [navParam, setNavParam] = useState(null);
   const [aiOpen, setAiOpen] = useState(false);
-  const { online, pending, queue, justSynced } = useOffline();
+  const { online, pending, fallidas, queue, justSynced, reintentarFallidas } = useOffline();
 
   // Persiste la versión normalizada una sola vez si hizo falta migrar.
   useEffect(() => {
@@ -1767,6 +1792,12 @@ function AppInner() {
           <div className="sync-bar"><span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /><span>Sincronizando {pending.length} registro(s)...</span></div>
         )}
         {justSynced && <div className="online-bar"><span>✅</span><span>Datos sincronizados correctamente</span></div>}
+        {fallidas && fallidas.length > 0 && (
+          <div className="sync-bar" style={{ background: "rgba(232,90,82,.12)", color: "var(--red)", cursor: "pointer" }}
+               onClick={() => { if (confirm(`Hay ${fallidas.length} registro(s) que no se pudieron subir a la nube (quizá faltó crear una tabla en Supabase, o hubo un problema de red). No se han perdido. ¿Reintentar ahora?`)) reintentarFallidas(); }}>
+            <span>⚠️</span><span>{fallidas.length} registro(s) sin subir — toca para reintentar</span>
+          </div>
+        )}
         <div className="screen">
           <ErrorBoundary key={`${session.role}-${page}`} onReset={() => { setSession(null); setPage("home"); setNavParam(null); }}>
             {isAdmin && <>
