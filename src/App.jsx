@@ -391,6 +391,7 @@ const INITIAL = {
   ],
   solicitudes_compra: [],
   bitacora: [],
+  avances_fase: [],
   encargados: [
     { id: "en1", nombre: "Pedro Ramírez", pin: "5555", sueldo_dia: 650, categoria: "encargado" },
   ],
@@ -1168,6 +1169,13 @@ function progresoSiembra(data, siembraId) {
   const acts = (data.actividadesContables || data.actividades || []).filter(a => a.parcelaId === si.parcelaId && (a.siembraId === si.id || (!a.siembraId && enRango(a.fecha))));
 
   // Mapear cada etapa fenológica a un avance
+  // Avances manuales registrados para esta siembra (el más reciente por etapa prevalece)
+  const avancesManuales = {};
+  (data.avances_fase || [])
+    .filter(av => av.siembraId === si.id)
+    .sort((a, b) => (a.fecha || "").localeCompare(b.fecha || "") || (a.creadaEn || 0) - (b.creadaEn || 0))
+    .forEach(av => { avancesManuales[av.etapa] = av; }); // el último sobrescribe = el más reciente
+
   const etapas = (cultivo?.fenologia || []).map(et => {
     // Actividades cuyo tipo coincide con el nombre de la etapa (insensible a mayúsculas)
     const actsEtapa = acts.filter(a => (a.tipo || "").toLowerCase().includes(et.etapa.toLowerCase())
@@ -1177,7 +1185,13 @@ function progresoSiembra(data, siembraId) {
     const tieneSuperficie = supCubierta > 0;
     // Avance real
     let avanceReal;
-    if (tieneSuperficie && hectareasParcela > 0) {
+    let fuenteAvance = "auto";
+    const avManual = avancesManuales[et.etapa];
+    if (avManual) {
+      // El avance reportado a mano en campo prevalece sobre el calculado.
+      avanceReal = Math.max(0, Math.min(100, parseFloat(avManual.porcentaje) || 0));
+      fuenteAvance = "manual";
+    } else if (tieneSuperficie && hectareasParcela > 0) {
       avanceReal = Math.min(100, (supCubierta / hectareasParcela) * 100);
     } else {
       // Respaldo: si hay actividades de la etapa, se considera iniciada/hecha
@@ -1190,8 +1204,12 @@ function progresoSiembra(data, siembraId) {
     else avanceEsperado = ((diasTranscurridos - et.diaInicio) / (et.diaFin - et.diaInicio)) * 100;
     // Estado
     let estado = "pendiente";
-    if (avanceReal >= 100) estado = "completada";
-    else if (avanceReal > 0) estado = "en_proceso";
+    if (avManual && avManual.estado) {
+      estado = avManual.estado; // estado reportado a mano
+    } else {
+      if (avanceReal >= 100) estado = "completada";
+      else if (avanceReal > 0) estado = "en_proceso";
+    }
     // ¿Atrasada? Se esperaba más de lo que se ha hecho
     const atraso = avanceEsperado - avanceReal;
     let semaforo = "ok";
@@ -1202,6 +1220,7 @@ function progresoSiembra(data, siembraId) {
       etapa: et.etapa, diaInicio: et.diaInicio, diaFin: et.diaFin,
       avanceReal, avanceEsperado, estado, atraso, semaforo, tieneSuperficie,
       supCubierta, nActs: actsEtapa.length,
+      fuenteAvance, avManual: avManual || null,
     };
   });
   // Resumen general
@@ -1215,6 +1234,61 @@ function progresoSiembra(data, siembraId) {
   };
 }
 
+/* ──── Panel de operación: estado de TODO el rancho en vivo ──── */
+// Cruza todas las siembras activas y arma tres bloques:
+//  - enProceso: fases a medias (1-99%), agrupadas por labor
+//  - pendientes: fases que ya deberían haber avanzado pero van atrasadas
+//  - cosecha: parcelas en etapa de cosecha con lo que llevan recolectado
+function panelOperacion(data) {
+  const siembras = (data.siembras || []).filter(s => s.estado === "activa");
+  const enProcesoPorLabor = {}; // labor -> [{parcela, pct, cultivo}]
+  const pendientesPorLabor = {}; // labor -> [{parcela, cultivo, atraso}]
+  const cosechas = [];
+
+  siembras.forEach(s => {
+    const pr = progresoSiembra(data, s.id);
+    if (!pr) return;
+    const p = pr.p;
+    const nombreParcela = p?.nombre || "—";
+    pr.etapas.forEach(e => {
+      const esCosecha = e.etapa.toLowerCase().includes("cosecha") || e.etapa.toLowerCase().includes("corte");
+      // En proceso: avance entre 1 y 99
+      if (e.avanceReal > 0 && e.avanceReal < 100) {
+        if (!enProcesoPorLabor[e.etapa]) enProcesoPorLabor[e.etapa] = [];
+        enProcesoPorLabor[e.etapa].push({
+          parcela: nombreParcela, parcelaId: p?.id, pct: Math.round(e.avanceReal),
+          cultivo: s.cultivoNombre, siembraId: s.id, fuente: e.fuenteAvance, semaforo: e.semaforo,
+        });
+      }
+      // Pendiente/atrasada: el calendario espera avance pero va en rojo/amarillo y no completada
+      if (e.estado !== "completada" && (e.semaforo === "rojo" || e.semaforo === "amarillo")) {
+        if (!pendientesPorLabor[e.etapa]) pendientesPorLabor[e.etapa] = [];
+        pendientesPorLabor[e.etapa].push({
+          parcela: nombreParcela, parcelaId: p?.id, cultivo: s.cultivoNombre,
+          atraso: Math.round(e.atraso), siembraId: s.id, avance: Math.round(e.avanceReal),
+        });
+      }
+    });
+    // Cosecha en curso: si la etapa actual es cosecha/corte
+    const ea = etapaActual(data, s);
+    const enCosecha = ea && (ea.etapa.toLowerCase().includes("cosecha") || ea.etapa.toLowerCase().includes("corte"));
+    if (enCosecha) {
+      const rep = reporteSiembra(data, s.id);
+      cosechas.push({
+        parcela: nombreParcela, parcelaId: p?.id, cultivo: s.cultivoNombre, siembraId: s.id,
+        cosechado: rep?.cosechaTotal || 0, unidad: rep?.cosechaUnidad || "",
+      });
+    }
+  });
+
+  return {
+    enProceso: Object.entries(enProcesoPorLabor).map(([labor, items]) => ({ labor, items })).sort((a, b) => b.items.length - a.items.length),
+    pendientes: Object.entries(pendientesPorLabor).map(([labor, items]) => ({ labor, items: items.sort((x, y) => y.atraso - x.atraso) })).sort((a, b) => b.items.length - a.items.length),
+    cosechas,
+    totalSiembrasActivas: siembras.length,
+  };
+}
+
 // Lista de tablas que existen en Supabase (definida una vez, fuera del hook).
 const TABLAS_NUBE = [
   "ranchos","parcelas","cultivos","siembras","trabajadores",
@@ -1222,7 +1296,7 @@ const TABLAS_NUBE = [
   "inventario","actividades","cosechas","aplicaciones","ingresos",
   "egresos","compras","entradas_inv","tareas","bonificaciones",
   "incidencias","prestamos","cajachica","creditos","proveedores",
-  "ciclos","asistencia","envios_bodega","solicitudes_compra","bitacora",
+  "ciclos","asistencia","envios_bodega","solicitudes_compra","bitacora","avances_fase",
 ];
 
 function useOffline() {
@@ -1689,7 +1763,7 @@ function AppInner() {
               {page === "registro-masivo" && <RegistroMasivo data={data} add={add} upd={upd} setInv={setInv} session={session} onClose={() => setPage("home")} />}
               {page === "cosechas" && <GestionCosechas data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
               {page === "ciclos" && <GestionCiclos data={data} add={add} upd={upd} del={del} onClose={() => setPage("home")} />}
-              {page === "calendario" && <CalendarioCultivos data={data} add={add} upd={upd} del={del} onClose={() => setPage("home")} />}
+              {page === "calendario" && <CalendarioCultivos data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
               {page === "panel-parcelas" && <PanelParcelas data={data} add={add} del={del} session={session} onClose={() => setPage("home")} onNav={setPage} />}
               {page === "asistencia" && <GestionAsistencia data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
               {page === "resumen" && <ResumenSemanal data={data} onClose={() => setPage("home")} />}
@@ -1697,6 +1771,7 @@ function AppInner() {
               {page === "panel-financiero" && <PanelFinanciero data={data} onClose={() => setPage("home")} />}
               {page === "subir-nube" && <SubirCatalogos data={data} setData={setData} session={session} onClose={() => setPage("home")} />}
               {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
+              {page === "operacion" && <PanelOperacion data={data} onClose={() => setPage("home")} onVerParcela={() => setPage("calendario")} />}
             </>}
             {isEncargado && <>
               {page === "home" && <EncargadoHome data={data} session={session} onNav={setPage} onLogout={cerrarSesion} online={online} />}
@@ -1709,6 +1784,7 @@ function AppInner() {
               {page === "asistencia" && <GestionAsistencia data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
               {page === "aprobacion-externos" && <AprobacionExternos data={data} upd={upd} onBack={() => setPage("home")} />}
               {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
+              {page === "operacion" && <PanelOperacion data={data} onClose={() => setPage("home")} />}
             </>}
             {isTrab && <>
               {page === "home" && <TrabReg data={data} add={add} upd={upd} setInv={setInv} session={session} online={online} onLogout={cerrarSesion} />}
@@ -1736,6 +1812,7 @@ function AppInner() {
               {page === "compras-insumos" && <AgronomoCompras data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
               {page === "reporte" && <TrabReporte data={data} add={add} session={session} onLogout={cerrarSesion} />}
               {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
+              {page === "operacion" && <PanelOperacion data={data} onClose={() => setPage("home")} />}
             </>}
             {isDueno && <>
               {page === "home" && <DuenoHome data={data} session={session} onNav={setPage} onLogout={cerrarSesion} />}
@@ -1743,6 +1820,7 @@ function AppInner() {
               {page === "reportes" && <AdminReportes data={data} soloLectura={true} />}
               {page === "panel-parcelas" && <PanelParcelas data={data} add={add} del={del} session={session} onClose={() => setPage("home")} />}
               {page === "resumen" && <ResumenSemanal data={data} onClose={() => setPage("home")} />}
+              {page === "operacion" && <PanelOperacion data={data} onClose={() => setPage("home")} />}
             </>}
             {isFinanzas && <>
               {page === "home" && <FinanzasHome data={data} session={session} onNav={setPage} onLogout={cerrarSesion} />}
@@ -1750,6 +1828,7 @@ function AppInner() {
               {page === "deudas" && <GestionDeudas data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
               {page === "contabilidad" && <AdminContabilidad data={data} add={add} upd={upd} del={del} setInv={setInv} />}
               {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
+              {page === "operacion" && <PanelOperacion data={data} onClose={() => setPage("home")} />}
             </>}
           </ErrorBoundary>
         </div>
@@ -2050,6 +2129,7 @@ function AdminHome({ data, alertas, onNav, onLogout, pending, online }) {
             <div className="option-card" onClick={() => onNav("panel-financiero")}><span className="oc-icon">💰</span><span className="oc-label">¿Cómo vamos?</span><span className="oc-sub">Resumen del dinero</span></div>
             <div className="option-card" onClick={() => onNav("subir-nube")}><span className="oc-icon">☁️</span><span className="oc-label">Subir a la nube</span><span className="oc-sub">Migración inicial</span></div>
             <div className="option-card" onClick={() => onNav("solicitudes")}><span className="oc-icon">🛒</span><span className="oc-label">Compras</span><span className="oc-sub">Solicitudes del personal</span></div>
+            <div className="option-card" onClick={() => onNav("operacion")}><span className="oc-icon">🎯</span><span className="oc-label">Operación</span><span className="oc-sub">Qué pasa ahora en campo</span></div>
           </div>
         </div>
         <div className="card">
@@ -5085,6 +5165,7 @@ function EncargadoHome({ data, session, onNav, onLogout, online }) {
             <div className="option-card" onClick={() => onNav("asistencia")}><span className="oc-icon">📅</span><span className="oc-label">Asistencia</span><span className="oc-sub">Pase de lista</span></div>
             <div className="option-card" onClick={() => onNav("caja")}><span className="oc-icon">💵</span><span className="oc-label">Caja chica</span><span className="oc-sub">Gastos y movimientos</span></div>
             <div className="option-card" onClick={() => onNav("solicitudes")}><span className="oc-icon">🛒</span><span className="oc-label">Compras</span><span className="oc-sub">Solicitar y gestionar</span></div>
+            <div className="option-card" onClick={() => onNav("operacion")}><span className="oc-icon">🎯</span><span className="oc-label">Operación</span><span className="oc-sub">Qué pasa ahora en campo</span></div>
           </div>
         </div>
         <div className="card">
@@ -6735,12 +6816,13 @@ function ResumenSemanal({ data, onClose }) {
 /* ════════════ CALENDARIO DE CULTIVOS (TABLA) — ADMIN ════════════ */
 /* Tabla de planeación: parcelas en filas, meses en columnas.
    En cada celda se asigna el cultivo que estará en esa parcela ese mes. */
-function CalendarioCultivos({ data, add, upd, del, onClose }) {
+function CalendarioCultivos({ data, add, upd, del, session, onClose }) {
   const hoy = new Date();
   const [anio, setAnio] = useState(hoy.getFullYear());
   const [celda, setCelda] = useState(null); // { parcelaId, mes }
   const [detalleSiembra, setDetalleSiembra] = useState(null);
   const [editSiembra, setEditSiembra] = useState(null);
+  const [reportarAvance, setReportarAvance] = useState(null); // { siembra, etapa }
   const MESES_CORTO = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
 
   // Calcula la fecha de cosecha estimada dada una fecha de siembra y cultivo
@@ -6829,19 +6911,36 @@ function CalendarioCultivos({ data, add, upd, del, onClose }) {
             </div>
           )}
 
-          {cultivo && cultivo.fenologia && (
+          {cultivo && cultivo.fenologia && pr && (
             <div className="card">
-              <div className="card-title">Ciclo fenológico — {cultivo.nombre}</div>
-              {cultivo.fenologia.map((et, i) => {
+              <div className="card-title">Avance por fase — {cultivo.nombre}</div>
+              <div className="text-xs text-muted mb-3">El avance se calcula solo, pero puedes reportar a mano lo que se ve en campo (emergencia, brotación, etc.).</div>
+              {pr.etapas.map((e, i) => {
                 const fechaEt = new Date(si.fechaSiembra + "T00:00:00");
-                fechaEt.setDate(fechaEt.getDate() + et.diaInicio);
-                const esActual = ea && ea.etapa === et.etapa;
+                fechaEt.setDate(fechaEt.getDate() + e.diaInicio);
+                const esActual = ea && ea.etapa === e.etapa;
+                const colorBarra = e.estado === "completada" ? "var(--safe)" : e.semaforo === "rojo" ? "var(--red)" : e.semaforo === "amarillo" ? "var(--gold)" : "var(--accent)";
                 return (
-                  <div key={i} className="list-item" style={esActual ? { background: "rgba(126,200,50,.08)", borderRadius: 8 } : {}}>
-                    <div className="li-icon" style={{ background: esActual ? "var(--accent)" : "var(--surface2)" }}>{esActual ? "▶" : i + 1}</div>
-                    <div className="li-body">
-                      <div className="li-title">{et.etapa}</div>
-                      <div className="li-sub">{fechaEt.toISOString().slice(0, 10)}</div>
+                  <div key={i} style={{ borderBottom: i < pr.etapas.length - 1 ? "1px solid var(--border)" : "none", paddingBottom: 12, marginBottom: 12 }}>
+                    <div className="flex-b mb-1">
+                      <span className="text-sm font-bold" style={esActual ? { color: "var(--accent)" } : {}}>
+                        {esActual ? "▶ " : ""}{e.etapa}
+                      </span>
+                      <span className="text-sm font-bold">{Math.round(e.avanceReal)}%</span>
+                    </div>
+                    <div className="progress mb-1"><div className="progress-fill" style={{ width: `${e.avanceReal}%`, background: colorBarra }} /></div>
+                    <div className="flex-b">
+                      <span className="text-xs text-muted">
+                        {e.fuenteAvance === "manual"
+                          ? `Reportado en campo${e.avManual?.fecha ? " · " + e.avManual.fecha : ""}`
+                          : e.nActs > 0 ? `${e.nActs} actividad(es)` : "Calculado por fecha"}
+                      </span>
+                      {si.estado === "activa" && (
+                        <button className="btn-ghost text-xs" style={{ color: "var(--accent)", fontWeight: 700 }}
+                                onClick={() => setReportarAvance({ siembra: si, etapa: e.etapa, actual: e.avManual })}>
+                          Reportar avance
+                        </button>
+                      )}
                     </div>
                   </div>
                 );
@@ -6874,6 +6973,12 @@ function CalendarioCultivos({ data, add, upd, del, onClose }) {
               ["notas", "Notas", "textarea"],
             ]}
             onClose={() => setEditSiembra(null)}
+          />
+        )}
+        {reportarAvance && (
+          <ReportarAvanceModal
+            siembra={reportarAvance.siembra} etapa={reportarAvance.etapa} actual={reportarAvance.actual}
+            add={add} session={session} onClose={() => setReportarAvance(null)}
           />
         )}
       </div>
@@ -7595,6 +7700,7 @@ function AgronomoHome({ data, session, onNav, onLogout, online }) {
             <div className="option-card" onClick={() => onNav("compras-insumos")}><span className="oc-icon">🛒</span><span className="oc-label">Insumos</span><span className="oc-sub">Comprar / pedir</span></div>
             <div className="option-card" onClick={() => onNav("reporte")}><span className="oc-icon">⚠️</span><span className="oc-label">Reportar</span><span className="oc-sub">Incidencia en cultivo</span></div>
             <div className="option-card" onClick={() => onNav("solicitudes")}><span className="oc-icon">🛒</span><span className="oc-label">Solicitar compra</span><span className="oc-sub">Lista para finanzas</span></div>
+            <div className="option-card" onClick={() => onNav("operacion")}><span className="oc-icon">🎯</span><span className="oc-label">Operación</span><span className="oc-sub">Qué pasa ahora en campo</span></div>
           </div>
         </div>
 
@@ -8284,6 +8390,7 @@ function DuenoHome({ data, session, onNav, onLogout }) {
             <div className="option-card" onClick={() => onNav("reportes")}><span className="oc-icon">📈</span><span className="oc-label">Reportes</span><span className="oc-sub">Por cultivo y parcela</span></div>
             <div className="option-card" onClick={() => onNav("panel-parcelas")}><span className="oc-icon">🌾</span><span className="oc-label">Parcelas</span><span className="oc-sub">Estado de cultivos</span></div>
             <div className="option-card" onClick={() => onNav("resumen")}><span className="oc-icon">📰</span><span className="oc-label">Resumen</span><span className="oc-sub">Cómo va la semana</span></div>
+            <div className="option-card" onClick={() => onNav("operacion")}><span className="oc-icon">🎯</span><span className="oc-label">Operación</span><span className="oc-sub">Qué pasa ahora en campo</span></div>
           </div>
         </div>
 
@@ -8356,6 +8463,8 @@ function FinanzasHome({ data, session, onNav, onLogout }) {
             <div className="option-card" onClick={() => onNav("proyeccion")}><span className="oc-icon">📅</span><span className="oc-label">Semana</span><span className="oc-sub">Qué se va a necesitar</span></div>
             <div className="option-card" onClick={() => onNav("deudas")}><span className="oc-icon">🏦</span><span className="oc-label">Deudas</span><span className="oc-sub">Créditos y pagos</span></div>
             <div className="option-card" onClick={() => onNav("contabilidad")}><span className="oc-icon">📊</span><span className="oc-label">Finanzas</span><span className="oc-sub">Ingresos y egresos</span></div>
+            <div className="option-card" onClick={() => onNav("operacion")}><span className="oc-icon">🎯</span><span className="oc-label">Operación</span><span className="oc-sub">Qué pasa ahora en campo</span></div>
+            <div className="option-card" onClick={() => onNav("solicitudes")}><span className="oc-icon">🛒</span><span className="oc-label">Compras</span><span className="oc-sub">Solicitudes del personal</span></div>
           </div>
         </div>
       </div>
@@ -9329,6 +9438,165 @@ function BitacoraParcela({ data, add, del, parcelaId, session, onClose, embedded
         <h2>Bitácora{parcela ? ` · ${parcela.nombre}` : ""} 📒</h2>
       </div>
       <div className="section-pad">{contenido}</div>
+    </div>
+  );
+}
+
+/* ════════════ MODAL: REPORTAR AVANCE DE FASE ════════════ */
+/* Permite registrar a mano el % y estado de una fase fenológica
+   (lo que se ve en campo: emergencia, brotación, etc.). */
+function ReportarAvanceModal({ siembra, etapa, actual, add, session, onClose }) {
+  const [porcentaje, setPorcentaje] = useState(actual?.porcentaje != null ? String(actual.porcentaje) : "");
+  const [estado, setEstado] = useState(actual?.estado || "en_proceso");
+  const [nota, setNota] = useState("");
+  const [fecha, setFecha] = useState(today());
+
+  const guardar = () => {
+    const pct = Math.max(0, Math.min(100, parseFloat(porcentaje) || 0));
+    add("avances_fase", {
+      siembraId: siembra.id,
+      parcelaId: siembra.parcelaId,
+      etapa,
+      porcentaje: pct,
+      estado,
+      nota: nota.trim(),
+      fecha: fecha || today(),
+      creadaEn: Date.now(),
+      reportadoPor: { id: session.id, nombre: session.nombre || "", rol: session.role },
+    });
+    onClose();
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-sheet" onClick={e => e.stopPropagation()}>
+        <div className="flex-b mb-3">
+          <h3 style={{ margin: 0, fontSize: 18 }}>Reportar avance</h3>
+          <button className="btn-ghost" onClick={onClose} style={{ fontSize: 20 }}>✕</button>
+        </div>
+        <div className="card" style={{ background: "rgba(126,200,50,.06)", border: "1px solid rgba(126,200,50,.2)" }}>
+          <div className="font-bold">{etapa}</div>
+          <div className="text-sm text-muted mt-1">{nombreSiembra(siembra)}</div>
+        </div>
+
+        <div className="form-group" style={{ marginTop: 12 }}>
+          <label className="form-label">¿Qué tanto va? ({porcentaje || 0}%)</label>
+          <input type="range" min="0" max="100" step="5" value={porcentaje || 0}
+                 onChange={e => setPorcentaje(e.target.value)} style={{ width: "100%" }} />
+          <div className="flex-b text-xs text-muted"><span>0%</span><span>50%</span><span>100%</span></div>
+          <input type="number" className="inp mt-2" min="0" max="100" placeholder="O escribe el %"
+                 value={porcentaje} onChange={e => setPorcentaje(e.target.value)} />
+        </div>
+
+        <div className="form-group">
+          <label className="form-label">Estado</label>
+          <div className="gap-row">
+            {[["pendiente", "No iniciada"], ["en_proceso", "En proceso"], ["completada", "Completada"]].map(([v, l]) => (
+              <button key={v} className={`btn btn-sm ${estado === v ? "btn-accent" : "btn-outline"}`} style={{ flex: 1 }}
+                      onClick={() => { setEstado(v); if (v === "completada") setPorcentaje("100"); if (v === "pendiente") setPorcentaje("0"); }}>
+                {l}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="form-group">
+          <label className="form-label">Fecha del reporte</label>
+          <input type="date" className="inp" value={fecha} onChange={e => setFecha(e.target.value)} max={today()} />
+        </div>
+
+        <div className="form-group">
+          <label className="form-label">Nota (opcional)</label>
+          <textarea className="inp" placeholder="Ej: emergencia despareja en el sector bajo..." value={nota} onChange={e => setNota(e.target.value)} />
+        </div>
+
+        <div className="gap-row" style={{ marginTop: 12 }}>
+          <button className="btn btn-outline" style={{ flex: 1 }} onClick={onClose}>Cancelar</button>
+          <button className="btn btn-accent" style={{ flex: 1.5 }} onClick={guardar}>Guardar avance</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ════════════ PANEL DE OPERACIÓN EN VIVO ════════════ */
+/* Vista de toda la operación del rancho en este momento:
+   qué se está haciendo, dónde, cuánto se lleva, y qué está atrasado. */
+function PanelOperacion({ data, onClose, onVerParcela }) {
+  const op = panelOperacion(data);
+
+  return (
+    <div>
+      <div className="top-bar">
+        {onClose && <button className="btn-ghost" onClick={onClose}>‹</button>}
+        <h2>Operación en vivo 🎯</h2>
+      </div>
+      <div className="section-pad">
+        <div className="text-xs text-muted mb-3" style={{ paddingLeft: 4 }}>
+          Refleja lo último reportado en campo. {op.totalSiembrasActivas} siembra(s) activa(s).
+        </div>
+
+        {/* COSECHA EN CURSO */}
+        {op.cosechas.length > 0 && (
+          <div className="card" style={{ background: "rgba(245,166,35,.06)", border: "1px solid rgba(245,166,35,.25)" }}>
+            <div className="card-title">🌾 Cosecha en curso</div>
+            {op.cosechas.map((c, i) => (
+              <div key={i} className="list-item" style={{ cursor: onVerParcela ? "pointer" : "default" }} onClick={() => onVerParcela && onVerParcela(c.siembraId)}>
+                <div className="li-body">
+                  <div className="li-title">{c.cultivo} · {c.parcela}</div>
+                  <div className="li-sub">{c.cosechado > 0 ? `${fmtN(c.cosechado)} ${c.unidad} recolectado` : "Sin registro de cosecha aún"}</div>
+                </div>
+                <div className="li-right"><div className="li-val">🌾</div></div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* EN PROCESO AHORA */}
+        <div className="card">
+          <div className="card-title">🔴 En proceso ahora</div>
+          {op.enProceso.length === 0 && <div className="text-muted text-sm" style={{ padding: "12px 0" }}>Nada reportado en proceso. Si hay labores activas, repórtalas desde el detalle de cada siembra (botón "Reportar avance").</div>}
+          {op.enProceso.map((grupo, i) => (
+            <div key={i} style={{ marginBottom: 14 }}>
+              <div className="font-bold text-sm mb-2" style={{ color: "var(--accent)" }}>{grupo.labor}</div>
+              {grupo.items.map((it, j) => (
+                <div key={j} className="list-item" style={{ cursor: onVerParcela ? "pointer" : "default", paddingLeft: 8 }} onClick={() => onVerParcela && onVerParcela(it.siembraId)}>
+                  <div className="li-body">
+                    <div className="li-title" style={{ fontSize: 14 }}>{it.parcela} <span className="text-muted" style={{ fontWeight: 400 }}>· {it.cultivo}</span></div>
+                    <div className="progress" style={{ marginTop: 4 }}><div className="progress-fill" style={{ width: `${it.pct}%`, background: it.semaforo === "rojo" ? "var(--red)" : it.semaforo === "amarillo" ? "var(--gold)" : "var(--accent)" }} /></div>
+                  </div>
+                  <div className="li-right">
+                    <div className="li-val">{it.pct}%</div>
+                    {it.fuente === "manual" && <div className="li-val-sub">campo</div>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+
+        {/* PENDIENTES / ATRASADAS */}
+        <div className="card">
+          <div className="card-title">⏳ Atrasado o pendiente</div>
+          {op.pendientes.length === 0 && <div className="text-muted text-sm" style={{ padding: "12px 0" }}>Nada marcado como atrasado. 👍</div>}
+          {op.pendientes.map((grupo, i) => (
+            <div key={i} style={{ marginBottom: 14 }}>
+              <div className="font-bold text-sm mb-2" style={{ color: "var(--gold)" }}>{grupo.labor}</div>
+              {grupo.items.map((it, j) => (
+                <div key={j} className="list-item" style={{ cursor: onVerParcela ? "pointer" : "default", paddingLeft: 8 }} onClick={() => onVerParcela && onVerParcela(it.siembraId)}>
+                  <div className="li-body">
+                    <div className="li-title" style={{ fontSize: 14 }}>{it.parcela} <span className="text-muted" style={{ fontWeight: 400 }}>· {it.cultivo}</span></div>
+                    <div className="li-sub">{it.avance > 0 ? `${it.avance}% hecho` : "sin empezar"}</div>
+                  </div>
+                  <div className="li-right">
+                    <span className="badge badge-gold">atrasado</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

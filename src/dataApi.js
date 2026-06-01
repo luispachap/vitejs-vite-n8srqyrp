@@ -22,7 +22,7 @@ export const TABLAS = [
   "inventario", "actividades", "cosechas", "aplicaciones", "ingresos",
   "egresos", "compras", "entradas_inv", "tareas", "bonificaciones",
   "incidencias", "prestamos", "cajachica", "creditos", "proveedores",
-  "ciclos", "asistencia", "envios_bodega", "solicitudes_compra", "bitacora",
+  "ciclos", "asistencia", "envios_bodega", "solicitudes_compra", "bitacora", "avances_fase",
 ];
 
 // Catálogos que sí subimos a la nube en la primera carga.
@@ -67,6 +67,7 @@ const COLUMNAS_REALES = {
   envios_bodega:  ["id", "parcelaId", "fecha", "cultivo"],
   solicitudes_compra: ["id", "estado"],
   bitacora:       ["id"],
+  avances_fase:   ["id"],
 };
 
 // Diccionario: nombre en la app (camelCase) → nombre en SQL (snake_case)
