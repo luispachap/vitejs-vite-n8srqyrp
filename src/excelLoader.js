@@ -428,3 +428,69 @@ export function generarSQLCuentas(cuentas) {
 
   return lineas.join("\n");
 }
+
+/* ════════════ EXPORTAR PÓLIZAS PARA CONTPAQi ════════════ */
+/* Genera un Excel con formato de pólizas de diario para importar a ContPAQi.
+   - Una póliza por día (todos los movimientos del día agrupados).
+   - Cada movimiento es una línea con cuenta, cargo/abono, concepto y centro de
+     costos (el cultivo). El usuario mapea las cuentas con su catálogo.
+   El formato exacto de ContPAQi varía por empresa; este es un layout estándar de
+   póliza de diario que el usuario puede ajustar a su catálogo. */
+
+// movimientos: [{ fecha, tipo: "egreso"|"ingreso"|"costoMO", concepto, monto, cuenta, cultivo, contracuenta }]
+export function exportarPolizas(movimientos, opciones = {}) {
+  const { nombreEmpresa = "Agroselectos P&A", tipoPoliza = "Diario" } = opciones;
+
+  // Agrupar por fecha (una póliza por día)
+  const porDia = {};
+  movimientos.forEach(m => {
+    const f = m.fecha || "";
+    if (!f) return;
+    (porDia[f] = porDia[f] || []).push(m);
+  });
+  const dias = Object.keys(porDia).sort();
+
+  // Encabezados estilo ContPAQi (hoja electrónica de pólizas)
+  const filas = [[
+    "No. Poliza", "Tipo", "Fecha", "Concepto Poliza",
+    "Cuenta", "Concepto Movimiento", "Cargo", "Abono", "Centro Costos", "Referencia",
+  ]];
+
+  let numPoliza = 1;
+  dias.forEach(dia => {
+    const movs = porDia[dia];
+    const conceptoPoliza = `Movimientos del ${dia}`;
+    movs.forEach(m => {
+      const monto = Math.abs(parseFloat(m.monto) || 0);
+      // Egreso/costo: cargo a la cuenta de gasto, abono a la contracuenta (banco/caja/por pagar)
+      // Ingreso: cargo a la contracuenta (banco/cliente), abono a la cuenta de ingreso
+      const esIngreso = m.tipo === "ingreso";
+      const cuentaPrincipal = m.cuenta || "";
+      const contracuenta = m.contracuenta || "";
+      if (esIngreso) {
+        // Línea 1: cargo a contracuenta (lo que entra)
+        filas.push([numPoliza, tipoPoliza, dia, conceptoPoliza, contracuenta, m.concepto || "", monto, 0, m.cultivo || "", m.referencia || ""]);
+        // Línea 2: abono a cuenta de ingreso
+        filas.push([numPoliza, tipoPoliza, dia, conceptoPoliza, cuentaPrincipal, m.concepto || "", 0, monto, m.cultivo || "", m.referencia || ""]);
+      } else {
+        // Gasto/costo: cargo a la cuenta de gasto
+        filas.push([numPoliza, tipoPoliza, dia, conceptoPoliza, cuentaPrincipal, m.concepto || "", monto, 0, m.cultivo || "", m.referencia || ""]);
+        // Abono a la contracuenta
+        filas.push([numPoliza, tipoPoliza, dia, conceptoPoliza, contracuenta, m.concepto || "", 0, monto, m.cultivo || "", m.referencia || ""]);
+      }
+    });
+    numPoliza++;
+  });
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(filas);
+  // Anchos de columna
+  ws["!cols"] = [
+    { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 28 },
+    { wch: 16 }, { wch: 30 }, { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 20 },
+  ];
+  XLSX.utils.book_append_sheet(wb, ws, "Polizas");
+  const fname = `polizas-contpaqi-${dias[0] || "export"}_a_${dias[dias.length - 1] || ""}.xlsx`;
+  XLSX.writeFile(wb, fname);
+  return { polizas: numPoliza - 1, movimientos: movimientos.length, archivo: fname };
+}

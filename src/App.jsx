@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo, Component } from "react";
 import { supabase, supabaseListo, cuentaTecnicaListo, iniciarConCuentaTecnica } from "./supabase";
 import { migrarCatalogos, leerTodo, CATALOGOS, subirColeccion, guardarRegistro, borrarRegistro, vaciarTabla } from "./dataApi";
-import { generarPlantilla, leerExcel, excelAColecciones, validar, generarSQLCuentas, HOJAS } from "./excelLoader";
+import { generarPlantilla, leerExcel, excelAColecciones, validar, generarSQLCuentas, exportarPolizas, HOJAS } from "./excelLoader";
 
 /* ════════════ LOGO ════════════ */
 /* Logo de Agroselectos P&A en formato base64. */
@@ -432,6 +432,7 @@ const INITIAL = {
       ] },
   ],
   envios_bodega: [],
+  config_contpaqi: [],
 };
 
 /* ════════════ UTILIDADES ════════════ */
@@ -513,7 +514,10 @@ function calcularCostoManoObra(actividades, trabajadores) {
   // Estructura: { "trabajadorId|fecha": [actividad, actividad, ...] }
   const porTrabajadorDia = {};
   (actividades || []).forEach(a => {
-    if (!a || !a.parcelaId || !a.fecha) return;
+    if (!a || !a.fecha) return;
+    // Las actividades de bodega no tienen parcela: usan una clave virtual por cultivo.
+    const claveParcela = a.parcelaId || (a.esBodega && a.cultivoBodega ? `bodega:${a.cultivoBodega}` : "");
+    if (!claveParcela) return;
     // Las actividades guardan las horas como "horas" (modal nuevo) u "horas_trab" (admin/registro).
     const horas = parseFloat(a.horas) || parseFloat(a.horas_trab) || 0;
     if (horas <= 0) return;
@@ -529,7 +533,7 @@ function calcularCostoManoObra(actividades, trabajadores) {
     if (rol === "admin" || rol === "dueno" || rol === "finanzas") return;
     const k = `${trabajadorId}|${a.fecha}`;
     if (!porTrabajadorDia[k]) porTrabajadorDia[k] = [];
-    porTrabajadorDia[k].push({ parcelaId: a.parcelaId, horas, actividadId: a.id });
+    porTrabajadorDia[k].push({ parcelaId: claveParcela, horas, actividadId: a.id });
   });
 
   // Calcular costo por parcela
@@ -806,14 +810,99 @@ function reporteParcela(data, parcelaId) {
   };
 }
 
+// Calcula qué fracción (0..1) de una actividad "a repartir" le toca a una siembra.
+// Regla: proporcional a la superficie de cada siembra activa en la fecha de la
+// actividad; si ninguna tiene superficie capturada, se reparte en partes iguales.
+// Esta es la regla base (Capa 3); las reglas por fenología vendrán después.
+function fraccionReparto(data, actividad, siembraId) {
+  const activas = siembrasActivasEnFecha(data, actividad.parcelaId, actividad.fecha);
+  if (activas.length === 0) return 0;
+  const idx = activas.findIndex(s => s.id === siembraId);
+  if (idx === -1) return 0; // esta siembra no estaba activa cuando se hizo la actividad
+  const supTotal = activas.reduce((s, x) => s + (parseFloat(x.superficie) || 0), 0);
+  if (supTotal > 0) {
+    const sup = parseFloat(activas[idx].superficie) || 0;
+    return sup / supTotal; // proporcional a superficie
+  }
+  return 1 / activas.length; // partes iguales si no hay superficies
+}
+
+// Reporte de UNA siembra concreta (cultivo + variedad). Junta las actividades
+// ligadas directamente a esa siembra, MÁS la parte proporcional de las actividades
+// marcadas "a repartir" de su parcela. Base de "costo y rendimiento por variedad".
+function reporteSiembra(data, siembraId) {
+  const si = (data.siembras || []).find(s => s.id === siembraId);
+  if (!si) return null;
+  const todas = (data.actividadesContables || data.actividades || []);
+  // Actividades ligadas DIRECTAMENTE a esta siembra
+  const acts = todas.filter(a => a.siembraId === siembraId);
+  // Actividades "a repartir" de esta parcela: aportan una fracción proporcional
+  const aRepartir = todas.filter(a => a.siembraId === "__repartir__" && a.parcelaId === si.parcelaId);
+  let costoActs = acts.reduce((s, a) => s + costoActividad(a), 0);
+  let mo = acts.reduce((s, a) => s + (a.costoMO || 0), 0);
+  let ins = acts.reduce((s, a) => s + (a.costoInsumos || 0), 0);
+  let maq = acts.reduce((s, a) => s + (a.costoMaq || 0), 0);
+  // Agrupar por actividad (las directas)
+  const porActividad = {};
+  acts.forEach(a => {
+    if (!porActividad[a.tipo]) porActividad[a.tipo] = { tipo: a.tipo, total: 0, mo: 0, ins: 0, maq: 0, count: 0 };
+    const g = porActividad[a.tipo];
+    g.total += costoActividad(a); g.mo += a.costoMO || 0; g.ins += a.costoInsumos || 0; g.maq += a.costoMaq || 0; g.count++;
+  });
+  // Sumar la parte proporcional de las actividades a repartir
+  let costoRepartido = 0;
+  aRepartir.forEach(a => {
+    const frac = fraccionReparto(data, a, siembraId);
+    if (frac <= 0) return;
+    const cTot = costoActividad(a) * frac, cMo = (a.costoMO || 0) * frac, cIns = (a.costoInsumos || 0) * frac, cMaq = (a.costoMaq || 0) * frac;
+    costoActs += cTot; mo += cMo; ins += cIns; maq += cMaq; costoRepartido += cTot;
+    const tipo = `${a.tipo} (repartido)`;
+    if (!porActividad[tipo]) porActividad[tipo] = { tipo, total: 0, mo: 0, ins: 0, maq: 0, count: 0, repartido: true };
+    const g = porActividad[tipo];
+    g.total += cTot; g.mo += cMo; g.ins += cIns; g.maq += cMaq; g.count++;
+  });
+  const total = costoActs;
+  // Rendimiento: registros de cosecha ligados a esta siembra (viven dentro de cosechas[].registros)
+  const rendimiento = {};
+  let totalCosechado = 0;
+  const cosechasS = [];
+  (data.cosechas || []).forEach(c => {
+    (c.registros || []).forEach(r => {
+      if (r.siembraId === siembraId) {
+        const u = r.unidad || c.unidad || "u";
+        rendimiento[u] = (rendimiento[u] || 0) + (parseFloat(r.cantidad) || 0);
+        totalCosechado += parseFloat(r.cantidad) || 0;
+        cosechasS.push(r);
+      }
+    });
+  });
+  // Ingresos ligados a esta siembra (si se capturan así)
+  const ingresosS = (data.ingresos || []).filter(g => g.siembraId === siembraId);
+  const ingresoTotal = ingresosS.reduce((s, g) => s + g.monto, 0);
+  const p = data.parcelas.find(x => x.id === si.parcelaId);
+  // Superficie de la siembra: la propia si se capturó, o la de la parcela
+  const superficie = parseFloat(si.superficie) || (p ? p.hectareas : 0) || 0;
+  return {
+    siembra: si, cultivo: si.cultivoNombre, variedad: si.variedadNombre || "(sin variedad)",
+    parcela: p, acts, total, mo, ins, maq,
+    porActividad: Object.values(porActividad).sort((a, b) => b.total - a.total),
+    rendimiento, cosechas: cosechasS,
+    ingresos: ingresosS, ingresoTotal, utilidad: ingresoTotal - total,
+    superficie, porHa: superficie ? total / superficie : 0,
+    costoRepartido,
+    rendimientoPorHa: superficie ? totalCosechado / superficie : 0,
+    totalCosechado,
+  };
+}
+
 // Reporte por cultivo: agrupa todas las parcelas del mismo cultivo
 function reporteCultivo(data, cultivo) {
   const parcelas = data.parcelas.filter(p => p.cultivo === cultivo);
   const subreportes = parcelas.map(p => reporteParcela(data, p.id));
-  const total = subreportes.reduce((s, r) => s + r.total, 0);
-  const mo = subreportes.reduce((s, r) => s + r.mo, 0);
-  const ins = subreportes.reduce((s, r) => s + r.ins, 0);
-  const maq = subreportes.reduce((s, r) => s + r.maq, 0);
+  let total = subreportes.reduce((s, r) => s + r.total, 0);
+  let mo = subreportes.reduce((s, r) => s + r.mo, 0);
+  let ins = subreportes.reduce((s, r) => s + r.ins, 0);
+  let maq = subreportes.reduce((s, r) => s + r.maq, 0);
   const hectareas = parcelas.reduce((s, p) => s + (p.hectareas || 0), 0);
   const ingresoTotal = subreportes.reduce((s, r) => s + r.ingresoTotal, 0);
   // Combinar actividades de todas las parcelas
@@ -829,10 +918,30 @@ function reporteCultivo(data, cultivo) {
     if (!porInsumo[key]) porInsumo[key] = { nombre: i.nombre, emoji: i.emoji, unidad: i.unidad, cantidad: 0, costo: 0 };
     porInsumo[key].cantidad += i.cantidad; porInsumo[key].costo += i.costo;
   }));
+
+  // Actividades de BODEGA ligadas a este cultivo (no tienen parcela, pero son costo del cultivo).
+  const actsBodega = (data.actividadesContables || data.actividades || []).filter(a => a.esBodega && a.cultivoBodega === cultivo);
+  let moBodega = 0, insBodega = 0, maqBodega = 0;
+  actsBodega.forEach(a => {
+    const aMo = a.costoMO || 0, aMaq = a.costoMaq || 0, aIns = a.costoInsumos || 0;
+    moBodega += aMo; maqBodega += aMaq; insBodega += aIns;
+    const t = a.tipo || "Otro";
+    if (!porActividad[t]) porActividad[t] = { tipo: t, total: 0, mo: 0, ins: 0, maq: 0, count: 0, esBodega: true };
+    const x = porActividad[t];
+    x.total += aMo + aMaq + aIns; x.mo += aMo; x.maq += aMaq; x.ins += aIns; x.count += 1;
+    (a.insumos || []).forEach(i => {
+      if (!porInsumo[i.nombre]) porInsumo[i.nombre] = { nombre: i.nombre, emoji: i.emoji, unidad: i.unidad, cantidad: 0, costo: 0 };
+      porInsumo[i.nombre].cantidad += i.cantidad || 0; porInsumo[i.nombre].costo += i.costo || 0;
+    });
+  });
+  const totalBodega = moBodega + insBodega + maqBodega;
+  total += totalBodega; mo += moBodega; ins += insBodega; maq += maqBodega;
+
   return {
     cultivo, parcelas, total, mo, ins, maq, hectareas, ingresoTotal,
     porHa: hectareas ? total / hectareas : 0,
     utilidad: ingresoTotal - total,
+    costoBodega: totalBodega,
     porActividad: Object.values(porActividad).sort((a, b) => b.total - a.total),
     porInsumo: Object.values(porInsumo).sort((a, b) => b.costo - a.costo),
     subreportes,
@@ -910,12 +1019,12 @@ function reporteCosechaParcela(data, parcelaId) {
 
 // Registra una cosecha en la parcela a partir de una actividad de tipo Cosecha.
 // Si ya existe el registro de cosecha de la parcela, le suma el nuevo registro.
-function registrarCosecha(data, add, upd, { parcelaId, cantidad, unidad, registradoPor, fecha, nota, actividadId }) {
+function registrarCosecha(data, add, upd, { parcelaId, cantidad, unidad, registradoPor, fecha, nota, actividadId, siembraId, variedadNombre }) {
   const cant = parseFloat(cantidad) || 0;
   if (cant <= 0) return;
   const p = data.parcelas.find(x => x.id === parcelaId);
   const cosExist = (data.cosechas || []).find(c => c.parcelaId === parcelaId);
-  const nuevoReg = { id: `cr${Date.now()}${Math.floor(Math.random() * 999)}`, fecha: fecha || today(), cantidad: cant, unidad, registradoPor, nota: nota || "", actividadId };
+  const nuevoReg = { id: `cr${Date.now()}${Math.floor(Math.random() * 999)}`, fecha: fecha || today(), cantidad: cant, unidad, registradoPor, nota: nota || "", actividadId, siembraId: siembraId || "", variedadNombre: variedadNombre || "" };
   if (cosExist) {
     upd("cosechas", { ...cosExist, registros: [...(cosExist.registros || []), nuevoReg], unidad: cosExist.unidad || unidad });
   } else {
@@ -1068,6 +1177,18 @@ function siembraEnFecha(data, parcelaId, fecha) {
   return null;
 }
 
+// TODAS las siembras de una parcela cuyo rango cubre una fecha (pueden ser varias
+// si hay variedades o cultivos traslapados). Base de la Capa 3.
+function siembrasActivasEnFecha(data, parcelaId, fecha) {
+  const f = fecha || today();
+  return (data.siembras || []).filter(s => {
+    if (s.parcelaId !== parcelaId) return false;
+    if (s.estado === "finalizada" || s.estado === "cancelada") return false;
+    const { ini, fin } = rangoSiembra(s);
+    return f >= ini && f <= fin;
+  });
+}
+
 // La siembra activa actual de una parcela (estado activa, o la que cubre hoy)
 function siembraActiva(data, parcelaId) {
   const semb = (data.siembras || []).filter(s => s.parcelaId === parcelaId);
@@ -1096,6 +1217,64 @@ function etapaActual(data, si) {
     etapa: etapa ? etapa.etapa : (dias >= cultivo.duracionDias ? "Ciclo terminado" : "—"),
     dias, proxima: idx >= 0 && idx < cultivo.fenologia.length - 1 ? cultivo.fenologia[idx + 1] : null,
   };
+}
+
+// La etapa fenológica de una siembra en una FECHA dada (no en "hoy").
+// Sirve para deducir a qué cultivo pertenece una actividad por su fecha.
+function etapaEnFecha(data, si, fecha) {
+  if (!si || !fecha) return null;
+  const cultivo = (data.cultivos || []).find(c => c.id === si.cultivoId);
+  if (!cultivo || !Array.isArray(cultivo.fenologia) || cultivo.fenologia.length === 0) return null;
+  const inicio = new Date(si.fechaSiembra + "T00:00:00");
+  const dias = Math.floor((new Date(fecha + "T00:00:00") - inicio) / 86400000);
+  if (dias < 0) return null;
+  const etapa = cultivo.fenologia.find(e => dias >= e.diaInicio && dias < e.diaFin);
+  return etapa ? etapa.etapa : null;
+}
+
+// ¿Qué tan compatible es un tipo de actividad con una etapa fenológica?
+// Devuelve true si la actividad encaja con la etapa. Se usa para discernir,
+// cuando hay cultivos distintos en una parcela, a cuál va una actividad.
+function actividadEncajaEnEtapa(tipoActividad, etapa) {
+  if (!tipoActividad || !etapa) return false;
+  const t = tipoActividad.toLowerCase();
+  const e = etapa.toLowerCase();
+  // Mapa de palabras clave: actividad -> etapas donde tiene sentido
+  const reglas = [
+    { act: ["siembra", "plantaci", "trasplant"], eta: ["siembra", "establec", "plant", "germin", "emergencia"] },
+    { act: ["cosecha", "corte", "recolec"], eta: ["cosecha", "madur", "llenado"] },
+    { act: ["fertiliz", "abono", "nutri"], eta: ["crecim", "desarrollo", "vegetat", "bulbif", "llenado", "floraci"] },
+    { act: ["riego"], eta: ["crecim", "desarrollo", "vegetat", "floraci", "bulbif", "llenado", "establec", "emergencia"] },
+    { act: ["fumig", "aplicaci", "plaga", "control", "herbicid", "fungicid"], eta: ["crecim", "desarrollo", "vegetat", "floraci", "bulbif", "llenado"] },
+    { act: ["deshierb", "limpia", "deshoj", "poda"], eta: ["crecim", "desarrollo", "vegetat", "floraci"] },
+  ];
+  for (const r of reglas) {
+    if (r.act.some(k => t.includes(k)) && r.eta.some(k => e.includes(k))) return true;
+  }
+  return false;
+}
+
+// Sugiere a qué siembra atribuir una actividad, usando fenología cuando hay
+// cultivos DISTINTOS en la parcela. Devuelve { siembra, razon } o null si no
+// puede discernir (entonces conviene repartir o preguntar).
+function sugerirSiembra(data, parcelaId, fecha, tipoActividad) {
+  const activas = siembrasActivasEnFecha(data, parcelaId, fecha);
+  if (activas.length === 0) return null;
+  if (activas.length === 1) return { siembra: activas[0], razon: "única siembra activa" };
+  const cultivosDistintos = new Set(activas.map(s => s.cultivoId)).size > 1;
+  if (!cultivosDistintos) {
+    // Mismo cultivo, varias variedades: la fenología no las distingue.
+    return null;
+  }
+  const compatibles = activas.filter(s => {
+    const et = etapaEnFecha(data, s, fecha);
+    return actividadEncajaEnEtapa(tipoActividad, et);
+  });
+  if (compatibles.length === 1) {
+    const s = compatibles[0];
+    return { siembra: s, razon: `${s.cultivoNombre} está en etapa compatible con "${tipoActividad}"` };
+  }
+  return null;
 }
 
 // Reporte de costos de una siembra específica
@@ -1867,6 +2046,9 @@ function AppInner() {
               {page === "compras" && <TrabCompras data={data} add={add} setInv={setInv} session={session} online={online} onLogout={() => setPage("home")} />}
               {page === "reporte" && <TrabReporte data={data} add={add} session={session} onLogout={() => setPage("home")} />}
               {page === "mas-funciones" && <AdminMasFunciones onNav={setPage} onClose={() => setPage("home")} />}
+              {page === "variedades" && <GestionVariedades data={data} upd={upd} session={session} onClose={() => setPage("home")} />}
+              {page === "reporte-variedades" && <ReporteVariedades data={data} onClose={() => setPage("home")} />}
+              {page === "contpaqi" && <ExportarContPAQi data={data} upd={upd} add={add} session={session} onClose={() => setPage("home")} />}
             </>}
             {isEncargado && <>
               {page === "home" && <EncargadoHome data={data} session={session} onNav={setPage} onLogout={cerrarSesion} online={online} />}
@@ -1908,6 +2090,8 @@ function AppInner() {
               {page === "reporte" && <TrabReporte data={data} add={add} session={session} onLogout={cerrarSesion} />}
               {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} setInv={setInv} aplicarLote={aplicarLote} session={session} onClose={() => setPage("home")} />}
               {page === "operacion" && <PanelOperacion data={data} onClose={() => setPage("home")} />}
+              {page === "variedades" && <GestionVariedades data={data} upd={upd} session={session} onClose={() => setPage("home")} />}
+              {page === "reporte-variedades" && <ReporteVariedades data={data} onClose={() => setPage("home")} />}
             </>}
             {isDueno && <>
               {page === "home" && <DuenoHome data={data} session={session} onNav={setPage} onLogout={cerrarSesion} />}
@@ -1924,6 +2108,7 @@ function AppInner() {
               {page === "contabilidad" && <AdminContabilidad data={data} add={add} upd={upd} del={del} setInv={setInv} />}
               {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} setInv={setInv} aplicarLote={aplicarLote} session={session} onClose={() => setPage("home")} />}
               {page === "operacion" && <PanelOperacion data={data} onClose={() => setPage("home")} />}
+              {page === "contpaqi" && <ExportarContPAQi data={data} upd={upd} add={add} session={session} onClose={() => setPage("home")} />}
             </>}
           </ErrorBoundary>
         </div>
@@ -6045,7 +6230,7 @@ function CreditoDetalle({ data, cr, add, upd, del, onClose }) {
 function RegistroActividadAdmin({ data, add, upd, setInv, session, onClose }) {
   const [paso, setPaso] = useState(1);
   const FORM0 = {
-    ejecutorTipo: "", ejecutorId: "", parcelaId: "", tipo: "", fecha: today(),
+    ejecutorTipo: "", ejecutorId: "", parcelaId: "", cultivoBodega: "", siembraId: "", tipo: "", fecha: today(),
     horas_trab: 8, maquinariaId: "", insumos: [], observaciones: "",
     cosechaCant: "", cosechaUnidad: "kg", hectareas_trab: "",
     // cuadrilla
@@ -6069,6 +6254,8 @@ function RegistroActividadAdmin({ data, add, upd, setInv, session, onClose }) {
 
   const enviar = () => {
     if (!form.parcelaId || !form.tipo || !form.ejecutorId) { alert("Faltan datos por completar"); return; }
+    const esBodega = form.parcelaId === "__bodega__";
+    if (esBodega && !form.cultivoBodega) { alert("Elige a qué cultivo aplica el trabajo de bodega"); return; }
     const actId = `a${Date.now()}`;
     let costoMO = 0, costoMaq = 0;
     if (esCuadrilla) {
@@ -6082,11 +6269,30 @@ function RegistroActividadAdmin({ data, add, upd, setInv, session, onClose }) {
       costoMaq = maq ? maq.costo_hora * form.horas_trab : 0;
     }
     const costoIns = form.insumos.reduce((s, i) => s + i.costo, 0);
-    const _sb = siembraEnFecha(data, form.parcelaId, form.fecha || today());
+    // Capa 3: si el usuario eligió una siembra específica, se respeta.
+    // Si no, se liga automáticamente por fecha. Bodega no liga a parcela.
+    let _sb = null;
+    let _siembraIdGuardar = null;
+    if (!esBodega) {
+      if (form.siembraId === "__repartir__") {
+        _siembraIdGuardar = "__repartir__"; // se reparte luego en el reporte
+      } else {
+        _sb = form.siembraId
+          ? (data.siembras || []).find(s => s.id === form.siembraId)
+          : siembraEnFecha(data, form.parcelaId, form.fecha || today());
+        _siembraIdGuardar = _sb?.id || null;
+      }
+    }
     const _regTipo = esCuadrilla ? "cuadrilla" : form.ejecutorTipo === "encargado" ? "encargado" : "planta";
     add("actividades", {
-      id: actId, fecha: form.fecha || today(), parcelaId: form.parcelaId, tipo: form.tipo,
-      siembraId: _sb?.id || null,
+      id: actId, fecha: form.fecha || today(),
+      parcelaId: esBodega ? "" : form.parcelaId,
+      esBodega: esBodega || false,
+      cultivoBodega: esBodega ? form.cultivoBodega : "",
+      tipo: form.tipo,
+      siembraId: _siembraIdGuardar,
+      variedadId: _sb?.variedadId || "",
+      variedadNombre: _sb?.variedadNombre || "",
       registradoPor: { tipo: _regTipo, id: form.ejecutorId },
       maquinariaId: esCuadrilla ? null : (form.maquinariaId || null),
       horas_maq: (!esCuadrilla && form.maquinariaId) ? form.horas_trab : 0,
@@ -6095,14 +6301,15 @@ function RegistroActividadAdmin({ data, add, upd, setInv, session, onClose }) {
       observaciones: form.observaciones, flete: esCuadrilla ? form.flete : 0,
       ...(esCuadrilla ? { modalidadPago: form.modalidad, cuadrilla_tarifa: form.tarifa, cuadrilla_unidades: form.unidades, cuadrilla_personas: form.personas } : {}),
       extras: {}, registradoEnNombrePor: { rol: session.role, id: session.id, nombre: session.nombre },
-      hectareas_trab: parseFloat(form.hectareas_trab) || 0,
-      cosecha: form.tipo === "Cosecha" ? { cantidad: parseFloat(form.cosechaCant) || 0, unidad: form.cosechaUnidad } : null,
+      hectareas_trab: esBodega ? 0 : (parseFloat(form.hectareas_trab) || 0),
+      cosecha: (!esBodega && form.tipo === "Cosecha") ? { cantidad: parseFloat(form.cosechaCant) || 0, unidad: form.cosechaUnidad } : null,
     });
-    if (form.tipo === "Cosecha" && parseFloat(form.cosechaCant) > 0) {
+    if (!esBodega && form.tipo === "Cosecha" && parseFloat(form.cosechaCant) > 0) {
       registrarCosecha(data, add, upd, {
         parcelaId: form.parcelaId, cantidad: form.cosechaCant, unidad: form.cosechaUnidad,
         registradoPor: { tipo: _regTipo, id: form.ejecutorId },
         fecha: form.fecha || today(), nota: form.observaciones, actividadId: actId,
+        siembraId: _sb?.id || "", variedadNombre: _sb?.variedadNombre || "",
       });
     }
     form.insumos.forEach(i => setInv(i.id, -i.cantidad));
@@ -6177,15 +6384,31 @@ function RegistroActividadAdmin({ data, add, upd, setInv, session, onClose }) {
           <>
             <div className="big-question">¿En qué parcela?</div>
             <div className="big-sub">Selecciona dónde se trabajó</div>
-            {data.parcelas.map(p => {
+            {data.parcelas.filter(p => (p.clave || "") !== "BOD" && !(p.nombre || "").toUpperCase().includes("BODEGA")).map(p => {
               const sug = getSugerencia(p, mesActual());
               return (
-                <div key={p.id} className={`parcela-card${form.parcelaId === p.id ? " active" : ""}`} onClick={() => { setForm(f => ({ ...f, parcelaId: p.id })); setPaso(3); }}>
+                <div key={p.id} className={`parcela-card${form.parcelaId === p.id ? " active" : ""}`} onClick={() => { setForm(f => ({ ...f, parcelaId: p.id, cultivoBodega: "" })); setPaso(3); }}>
                   {p.foto ? <img src={p.foto} className="parcela-thumb" alt="" /> : <div className="parcela-thumb-ph">{p.emoji}</div>}
                   <div className="parcela-body">
                     <div className="pc-name">{p.nombre}</div>
                     <div className="pc-sub">{p.cultivo} · {p.hectareas} ha</div>
                     {sug && <div className="pc-tag">💡 {sug.actividad} este mes</div>}
+                  </div>
+                </div>
+              );
+            })}
+            {/* Actividades de bodega / centro de operaciones, ligadas a un cultivo */}
+            <div className="text-sm font-bold mb-2 mt-3" style={{ paddingLeft: 4 }}>🏚️ Bodega / Centro de operaciones</div>
+            <div className="text-xs text-muted mb-2" style={{ paddingLeft: 4 }}>Para trabajos que se hacen en bodega y pertenecen a un cultivo (corrida del ajo, limpieza, etc.), no a una parcela.</div>
+            {[...new Set((data.cultivos || []).map(c => c.nombre))].filter(Boolean).map(cul => {
+              const sel = form.parcelaId === "__bodega__" && form.cultivoBodega === cul;
+              const emoji = (data.cultivos || []).find(c => c.nombre === cul)?.emoji || "🌱";
+              return (
+                <div key={cul} className={`parcela-card${sel ? " active" : ""}`} onClick={() => { setForm(f => ({ ...f, parcelaId: "__bodega__", cultivoBodega: cul })); setPaso(3); }}>
+                  <div className="parcela-thumb-ph">🏚️</div>
+                  <div className="parcela-body">
+                    <div className="pc-name">Bodega · {emoji} {cul}</div>
+                    <div className="pc-sub">Trabajo de bodega para {cul}</div>
                   </div>
                 </div>
               );
@@ -6205,6 +6428,33 @@ function RegistroActividadAdmin({ data, add, upd, setInv, session, onClose }) {
                 </div>
               ))}
             </div>
+            {/* Capa 3: si la parcela tiene varias siembras activas, elegir a cuál va */}
+            {(() => {
+              if (form.parcelaId === "__bodega__") return null;
+              const activas = siembrasActivasEnFecha(data, form.parcelaId, form.fecha || today());
+              if (activas.length < 2) return null;
+              const sugerencia = sugerirSiembra(data, form.parcelaId, form.fecha || today(), form.tipo);
+              return (
+                <div className="card" style={{ background: "rgba(96,165,250,.06)", border: "1px solid rgba(96,165,250,.25)", marginTop: 12 }}>
+                  <div className="text-sm font-bold mb-2">🧬 Esta parcela tiene varias siembras activas</div>
+                  {sugerencia && form.tipo && !form.siembraId && (
+                    <div className="text-xs mb-2" style={{ color: "var(--accent)", background: "rgba(126,200,50,.08)", padding: "6px 8px", borderRadius: 6 }}>
+                      💡 Sugerencia: <b>{sugerencia.siembra.cultivoNombre}{sugerencia.siembra.variedadNombre ? ` · ${sugerencia.siembra.variedadNombre}` : ""}</b> ({sugerencia.razon}).
+                      <button className="btn-ghost text-xs" style={{ padding: "0 0 0 6px", color: "var(--accent)", fontWeight: 700 }} onClick={() => setForm(f => ({ ...f, siembraId: sugerencia.siembra.id }))}>usar</button>
+                    </div>
+                  )}
+                  <div className="text-xs text-muted mb-2">¿A cuál se carga esta actividad?</div>
+                  <select className="inp" value={form.siembraId} onChange={e => setForm(f => ({ ...f, siembraId: e.target.value }))}>
+                    <option value="">Automático (según la fecha)</option>
+                    {activas.map(s => (
+                      <option key={s.id} value={s.id}>{s.cultivoNombre}{s.variedadNombre ? ` · ${s.variedadNombre}` : ""} (desde {s.fechaSiembra})</option>
+                    ))}
+                    <option value="__repartir__">⚖️ Repartir entre todas (proporcional)</option>
+                  </select>
+                  <div className="text-xs text-muted mt-1">"Repartir" divide el costo entre las siembras según su superficie. Útil para trabajos generales que tocan a todas.</div>
+                </div>
+              );
+            })()}
             <div className="divider" />
             {!esCuadrilla ? (
               <>
@@ -6241,6 +6491,20 @@ function RegistroActividadAdmin({ data, add, upd, setInv, session, onClose }) {
             {form.tipo === "Cosecha" && (
               <div className="card" style={{ background: "rgba(245,166,35,.06)", border: "1px solid rgba(245,166,35,.2)" }}>
                 <div className="text-sm font-bold mb-3">🌾 Cantidad cosechada</div>
+                {(() => {
+                  // ¿A qué siembra/variedad se ligará esta cosecha?
+                  if (form.parcelaId === "__bodega__") return null;
+                  const sb = form.siembraId && form.siembraId !== "__repartir__"
+                    ? (data.siembras || []).find(s => s.id === form.siembraId)
+                    : siembraEnFecha(data, form.parcelaId, form.fecha || today());
+                  if (sb && sb.variedadNombre) {
+                    return <div className="text-xs mb-2" style={{ color: "var(--accent)", background: "rgba(126,200,50,.08)", padding: "6px 8px", borderRadius: 6 }}>🧬 Este rendimiento se registrará para la variedad <b>{sb.variedadNombre}</b>.</div>;
+                  }
+                  if (sb) {
+                    return <div className="text-xs text-muted mb-2">Se registrará para la siembra de {sb.cultivoNombre}.</div>;
+                  }
+                  return null;
+                })()}
                 <div className="inp-row">
                   <div className="form-group" style={{ flex: 1 }}><label className="form-label">Cantidad</label><input type="number" className="inp" placeholder="0" value={form.cosechaCant} onChange={e => setForm(f => ({ ...f, cosechaCant: e.target.value }))} /></div>
                   <div className="form-group" style={{ flex: "0 0 130px" }}><label className="form-label">Unidad</label>
@@ -6943,7 +7207,7 @@ function CalendarioCultivos({ data, add, upd, del, session, onClose }) {
   };
 
   // Crear una siembra desde una celda (mes/parcela)
-  const FC0 = { cultivoId: "", presupuesto: 0, notas: "" };
+  const FC0 = { cultivoId: "", presupuesto: 0, notas: "", variedadId: "", superficie: "", semillaOrigen: "", semillaCosechaId: "", semillaProveedor: "", semillaLote: "", semillaAnio: "" };
   const [celdaForm, setCeldaForm] = useState(FC0);
 
   const crearSiembraEnCelda = () => {
@@ -6952,16 +7216,26 @@ function CalendarioCultivos({ data, add, upd, del, session, onClose }) {
     // La siembra inicia el día 1 del mes elegido
     const fechaSiembra = `${anio}-${String(celda.mes + 1).padStart(2, "0")}-01`;
     const fechaCosecha = cosechaEstimada(fechaSiembra, celdaForm.cultivoId);
-    // Cerrar siembra activa anterior de esa parcela si la hay
-    const activaPrev = (data.siembras || []).find(s => s.parcelaId === celda.parcelaId && s.estado === "activa");
-    if (activaPrev) {
-      upd("siembras", { ...activaPrev, estado: "finalizada", fechaCosechaReal: activaPrev.fechaCosechaReal || today() });
-    }
+    // NOTA: ya NO cerramos la siembra anterior. El calendario es el plan anual de
+    // cultivos: una parcela puede tener varias siembras (rotación por temporada,
+    // o varias variedades a la vez). Cada una vive por su cuenta.
+    const culVar = (cul?.variedades || []).find(v => v.id === celdaForm.variedadId);
     add("siembras", {
       id: `si${Date.now()}`, parcelaId: celda.parcelaId, cultivoId: celdaForm.cultivoId,
       cultivoNombre: cul?.nombre || "Cultivo", fechaSiembra,
       fechaCosechaEstimada: fechaCosecha, fechaCosechaReal: "", estado: "activa",
       presupuesto: parseFloat(celdaForm.presupuesto) || 0, notas: celdaForm.notas,
+      superficie: parseFloat(celdaForm.superficie) || 0,
+      // Capa 2: variedad y trazabilidad de semilla
+      variedadId: celdaForm.variedadId || "",
+      variedadNombre: culVar?.nombre || "",
+      semilla: {
+        origen: celdaForm.semillaOrigen || "",        // "propia" | "comprada" | ""
+        cosechaId: celdaForm.semillaCosechaId || "",   // si es propia, de qué cosecha
+        proveedor: celdaForm.semillaProveedor || "",   // si es comprada
+        lote: celdaForm.semillaLote || "",
+        anio: celdaForm.semillaAnio || "",
+      },
     });
     const p = data.parcelas.find(x => x.id === celda.parcelaId);
     if (p) upd("parcelas", { ...p, cultivo: cul?.nombre || p.cultivo });
@@ -6991,6 +7265,15 @@ function CalendarioCultivos({ data, add, upd, del, session, onClose }) {
             <div className="confirm-row"><span className="cr-label">Siembra</span><span className="cr-val">{si.fechaSiembra}</span></div>
             <div className="confirm-row"><span className="cr-label">Cosecha estimada</span><span className="cr-val">{si.fechaCosechaEstimada || "—"}</span></div>
             {si.fechaCosechaReal && <div className="confirm-row"><span className="cr-label">Cosecha real</span><span className="cr-val">{si.fechaCosechaReal}</span></div>}
+            {si.variedadNombre && <div className="confirm-row"><span className="cr-label">Variedad</span><span className="cr-val">🧬 {si.variedadNombre}</span></div>}
+            {si.semilla && si.semilla.origen === "propia" && (() => {
+              const co = (data.cosechas || []).find(x => x.id === si.semilla.cosechaId);
+              const p = co && data.parcelas.find(x => x.id === co.parcelaId);
+              return <div className="confirm-row"><span className="cr-label">Semilla</span><span className="cr-val">Propia{co ? ` · ${p?.nombre || ""} ${co.fecha?.slice(0, 4) || ""}` : ""}</span></div>;
+            })()}
+            {si.semilla && si.semilla.origen === "comprada" && (
+              <div className="confirm-row"><span className="cr-label">Semilla</span><span className="cr-val">Comprada{si.semilla.proveedor ? ` · ${si.semilla.proveedor}` : ""}{si.semilla.lote ? ` · lote ${si.semilla.lote}` : ""}</span></div>
+            )}
           </div>
 
           {ea && si.estado === "activa" && (
@@ -7198,6 +7481,56 @@ function CalendarioCultivos({ data, add, upd, del, session, onClose }) {
                 </div>
               </div>
             )}
+            {/* Capa 2: variedad y semilla (solo si el cultivo tiene variedades) */}
+            {(() => {
+              const cul = (data.cultivos || []).find(c => c.id === celdaForm.cultivoId);
+              const variedades = cul?.variedades || [];
+              if (!celdaForm.cultivoId) return null;
+              return (
+                <>
+                  {variedades.length > 0 && (
+                    <div className="form-group"><label className="form-label">Variedad (opcional)</label>
+                      <select className="inp" value={celdaForm.variedadId} onChange={e => setCeldaForm(f => ({ ...f, variedadId: e.target.value }))}>
+                        <option value="">Sin especificar</option>
+                        {variedades.map(v => <option key={v.id} value={v.id}>{v.nombre}</option>)}
+                      </select>
+                    </div>
+                  )}
+                  {variedades.length === 0 && (
+                    <div className="text-xs text-muted mb-3" style={{ paddingLeft: 2 }}>💡 Este cultivo no tiene variedades definidas. Puedes agregarlas en "Variedades".</div>
+                  )}
+                  <div className="form-group"><label className="form-label">Origen de la semilla (opcional)</label>
+                    <select className="inp" value={celdaForm.semillaOrigen} onChange={e => setCeldaForm(f => ({ ...f, semillaOrigen: e.target.value, semillaCosechaId: "", semillaProveedor: "" }))}>
+                      <option value="">Sin especificar</option>
+                      <option value="propia">Propia (de una cosecha)</option>
+                      <option value="comprada">Comprada</option>
+                    </select>
+                  </div>
+                  {celdaForm.semillaOrigen === "propia" && (
+                    <div className="form-group"><label className="form-label">¿De qué cosecha?</label>
+                      <select className="inp" value={celdaForm.semillaCosechaId} onChange={e => setCeldaForm(f => ({ ...f, semillaCosechaId: e.target.value }))}>
+                        <option value="">Seleccionar cosecha...</option>
+                        {(data.cosechas || []).slice().sort((a, b) => (b.fecha || "").localeCompare(a.fecha || "")).map(co => {
+                          const p = data.parcelas.find(x => x.id === co.parcelaId);
+                          return <option key={co.id} value={co.id}>{co.fecha} · {p?.nombre || "—"} · {fmtN(co.cantidad)} {co.unidad}</option>;
+                        })}
+                      </select>
+                      {(data.cosechas || []).length === 0 && <div className="text-xs text-muted mt-1">No hay cosechas registradas todavía.</div>}
+                    </div>
+                  )}
+                  {celdaForm.semillaOrigen === "comprada" && (
+                    <>
+                      <div className="form-group"><label className="form-label">Proveedor</label><input className="inp" value={celdaForm.semillaProveedor} onChange={e => setCeldaForm(f => ({ ...f, semillaProveedor: e.target.value }))} /></div>
+                      <div className="inp-row">
+                        <div className="form-group" style={{ flex: 1 }}><label className="form-label">Lote</label><input className="inp" value={celdaForm.semillaLote} onChange={e => setCeldaForm(f => ({ ...f, semillaLote: e.target.value }))} /></div>
+                        <div className="form-group" style={{ flex: 1 }}><label className="form-label">Año</label><input className="inp" value={celdaForm.semillaAnio} onChange={e => setCeldaForm(f => ({ ...f, semillaAnio: e.target.value }))} /></div>
+                      </div>
+                    </>
+                  )}
+                </>
+              );
+            })()}
+            <div className="form-group"><label className="form-label">Superficie de esta siembra (ha, opcional)</label><input type="number" className="inp" placeholder="Si hay varias siembras en la parcela, sirve para repartir costos" value={celdaForm.superficie} onChange={e => setCeldaForm(f => ({ ...f, superficie: e.target.value }))} /></div>
             <div className="form-group"><label className="form-label">Presupuesto del ciclo (opcional)</label><input type="number" className="inp" value={celdaForm.presupuesto || ""} onChange={e => setCeldaForm(f => ({ ...f, presupuesto: e.target.value }))} /></div>
             <div className="form-group"><label className="form-label">Notas (opcional)</label><input className="inp" value={celdaForm.notas} onChange={e => setCeldaForm(f => ({ ...f, notas: e.target.value }))} /></div>
             <button className="btn btn-accent" onClick={crearSiembraEnCelda}>Asignar cultivo</button>
@@ -8015,6 +8348,8 @@ function AgronomoHome({ data, session, onNav, onLogout, online }) {
             <div className="option-card" onClick={() => onNav("reporte")}><span className="oc-icon">⚠️</span><span className="oc-label">Reportar</span><span className="oc-sub">Incidencia en cultivo</span></div>
             <div className="option-card" onClick={() => onNav("solicitudes")}><span className="oc-icon">🛒</span><span className="oc-label">Solicitar compra</span><span className="oc-sub">Lista para finanzas</span></div>
             <div className="option-card" onClick={() => onNav("operacion")}><span className="oc-icon">🎯</span><span className="oc-label">Operación</span><span className="oc-sub">Qué pasa ahora en campo</span></div>
+            <div className="option-card" onClick={() => onNav("variedades")}><span className="oc-icon">🧬</span><span className="oc-label">Variedades</span><span className="oc-sub">Tipos de cada cultivo</span></div>
+            <div className="option-card" onClick={() => onNav("reporte-variedades")}><span className="oc-icon">📊</span><span className="oc-label">Comparar variedades</span><span className="oc-sub">Costo y rendimiento</span></div>
           </div>
         </div>
 
@@ -8724,6 +9059,7 @@ function FinanzasHome({ data, session, onNav, onLogout }) {
             <div className="option-card" onClick={() => onNav("contabilidad")}><span className="oc-icon">📊</span><span className="oc-label">Finanzas</span><span className="oc-sub">Ingresos y egresos</span></div>
             <div className="option-card" onClick={() => onNav("operacion")}><span className="oc-icon">🎯</span><span className="oc-label">Operación</span><span className="oc-sub">Qué pasa ahora en campo</span></div>
             <div className="option-card" onClick={() => onNav("solicitudes")}><span className="oc-icon">🛒</span><span className="oc-label">Compras</span><span className="oc-sub">Solicitudes del personal</span></div>
+            <div className="option-card" onClick={() => onNav("contpaqi")}><span className="oc-icon">📑</span><span className="oc-label">ContPAQi</span><span className="oc-sub">Exportar pólizas</span></div>
           </div>
         </div>
       </div>
@@ -10091,6 +10427,8 @@ function AdminMasFunciones({ onNav, onClose }) {
         { page: "aplicaciones", icon: "🧪", label: "Aplicaciones", sub: "Fertirriego / tratamientos" },
         { page: "compras-insumos", icon: "🛒", label: "Comprar insumos", sub: "Pedidos de insumos" },
         { page: "calendario", icon: "🌱", label: "Calendario", sub: "Siembras y avance por fase" },
+        { page: "variedades", icon: "🧬", label: "Variedades", sub: "Tipos de cada cultivo" },
+        { page: "reporte-variedades", icon: "📊", label: "Comparar variedades", sub: "Costo y rendimiento por variedad" },
       ],
     },
     {
@@ -10108,6 +10446,7 @@ function AdminMasFunciones({ onNav, onClose }) {
         { page: "caja", icon: "💵", label: "Caja chica", sub: "Gastos y movimientos" },
         { page: "deudas", icon: "🏦", label: "Deudas", sub: "Créditos y pagos" },
         { page: "proyeccion", icon: "📅", label: "Proyección semanal", sub: "Qué se va a necesitar" },
+        { page: "contpaqi", icon: "📑", label: "Exportar a ContPAQi", sub: "Pólizas para tu contabilidad" },
       ],
     },
     {
@@ -10144,6 +10483,319 @@ function AdminMasFunciones({ onNav, onClose }) {
             </div>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+/* ════════════ CAPA 1: CATÁLOGO DE VARIEDADES POR CULTIVO ════════════ */
+/* Pantalla para definir las variedades de cada cultivo (ej. tipos de ajo:
+   garra de tigre, acelerado, frío). Es solo un catálogo: no toca costos
+   ni siembras todavía. Esa es la base sobre la que se construye lo demás. */
+function GestionVariedades({ data, upd, session, onClose }) {
+  const [cultivoSel, setCultivoSel] = useState(null); // id del cultivo abierto
+  const [nuevaVar, setNuevaVar] = useState({ nombre: "", notas: "" });
+  const puedeEditar = ["admin", "agronomo", "dueno"].includes(session.role);
+
+  const cultivos = data.cultivos || [];
+  const cultivo = cultivos.find(c => c.id === cultivoSel);
+
+  const agregarVariedad = () => {
+    if (!cultivo) return;
+    if (!nuevaVar.nombre.trim()) { alert("Escribe el nombre de la variedad."); return; }
+    const variedades = Array.isArray(cultivo.variedades) ? cultivo.variedades : [];
+    // Evitar duplicados por nombre
+    if (variedades.some(v => v.nombre.toLowerCase() === nuevaVar.nombre.trim().toLowerCase())) {
+      alert("Ya existe una variedad con ese nombre en este cultivo."); return;
+    }
+    const nueva = {
+      id: `var_${cultivo.id}_${Date.now()}`,
+      nombre: nuevaVar.nombre.trim(),
+      notas: nuevaVar.notas.trim(),
+    };
+    upd("cultivos", { ...cultivo, variedades: [...variedades, nueva] });
+    setNuevaVar({ nombre: "", notas: "" });
+  };
+
+  const quitarVariedad = (varId) => {
+    if (!cultivo) return;
+    if (!confirm("¿Quitar esta variedad del cultivo?")) return;
+    const variedades = (cultivo.variedades || []).filter(v => v.id !== varId);
+    upd("cultivos", { ...cultivo, variedades });
+  };
+
+  // ── Vista detalle de un cultivo y sus variedades ──
+  if (cultivo) {
+    const variedades = Array.isArray(cultivo.variedades) ? cultivo.variedades : [];
+    return (
+      <div>
+        <div className="top-bar">
+          <button className="btn-ghost" onClick={() => { setCultivoSel(null); setNuevaVar({ nombre: "", notas: "" }); }}>‹</button>
+          <h2>{cultivo.emoji} {cultivo.nombre} · Variedades</h2>
+        </div>
+        <div className="section-pad">
+          <div className="text-xs text-muted mb-3" style={{ paddingLeft: 4 }}>
+            Define los tipos o variedades de {cultivo.nombre}. Más adelante podrás registrar costos y rendimientos por cada una.
+          </div>
+
+          {variedades.length === 0 && (
+            <div className="text-muted text-sm" style={{ textAlign: "center", padding: "24px 0" }}>
+              Este cultivo todavía no tiene variedades.
+            </div>
+          )}
+
+          {variedades.map(v => (
+            <div key={v.id} className="card">
+              <div className="flex-b">
+                <div>
+                  <div className="font-bold">{v.nombre}</div>
+                  {v.notas && <div className="text-sm text-muted" style={{ marginTop: 2 }}>{v.notas}</div>}
+                </div>
+                {puedeEditar && (
+                  <button className="btn-ghost text-xs" style={{ color: "var(--red)" }} onClick={() => quitarVariedad(v.id)}>quitar</button>
+                )}
+              </div>
+            </div>
+          ))}
+
+          {puedeEditar && (
+            <div className="card" style={{ background: "rgba(126,200,50,.05)", border: "1px solid rgba(126,200,50,.2)" }}>
+              <div className="card-title">Agregar variedad</div>
+              <div className="form-group">
+                <label className="form-label">Nombre de la variedad</label>
+                <input className="inp" placeholder="Ej: Garra de tigre, Acelerado, Frío..." value={nuevaVar.nombre} onChange={e => setNuevaVar(v => ({ ...v, nombre: e.target.value }))} />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Notas (opcional)</label>
+                <input className="inp" placeholder="Ej: ciclo más corto, requiere más frío..." value={nuevaVar.notas} onChange={e => setNuevaVar(v => ({ ...v, notas: e.target.value }))} />
+              </div>
+              <button className="btn btn-accent" style={{ width: "100%" }} onClick={agregarVariedad}>+ Agregar variedad</button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Vista principal: lista de cultivos ──
+  return (
+    <div>
+      <div className="top-bar">
+        {onClose && <button className="btn-ghost" onClick={onClose}>‹</button>}
+        <h2>Variedades de cultivos 🌱</h2>
+      </div>
+      <div className="section-pad">
+        <div className="text-xs text-muted mb-3" style={{ paddingLeft: 4 }}>
+          Elige un cultivo para ver y definir sus variedades. Por ejemplo, el ajo puede tener garra de tigre, acelerado, frío, etc.
+        </div>
+        {cultivos.length === 0 && (
+          <div className="text-muted text-sm" style={{ textAlign: "center", padding: "32px 0" }}>
+            No hay cultivos cargados. Sube tu Excel de catálogos primero.
+          </div>
+        )}
+        {cultivos.map(c => {
+          const n = Array.isArray(c.variedades) ? c.variedades.length : 0;
+          return (
+            <div key={c.id} className="card" style={{ cursor: "pointer" }} onClick={() => setCultivoSel(c.id)}>
+              <div className="flex-b">
+                <div className="font-bold">{c.emoji || "🌱"} {c.nombre}</div>
+                <span className="badge badge-blue">{n} variedad{n === 1 ? "" : "es"}</span>
+              </div>
+              {n > 0 && (
+                <div className="text-sm text-muted" style={{ marginTop: 4 }}>
+                  {c.variedades.slice(0, 4).map(v => v.nombre).join(", ")}{n > 4 ? "..." : ""}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ════════════ CAPA 3: REPORTE COMPARATIVO DE VARIEDADES ════════════ */
+/* Muestra, por cultivo, el costo y rendimiento de cada siembra/variedad,
+   para poder compararlas. Usa reporteSiembra (que liga por siembraId). */
+function ReporteVariedades({ data, onClose }) {
+  const siembras = (data.siembras || []).filter(s => s.estado !== "cancelada");
+  // Agrupar siembras por cultivo
+  const porCultivo = {};
+  siembras.forEach(s => {
+    const k = s.cultivoNombre || "Sin cultivo";
+    (porCultivo[k] = porCultivo[k] || []).push(s);
+  });
+  const cultivos = Object.keys(porCultivo).sort();
+
+  const fmtRend = (rend) => {
+    const e = Object.entries(rend || {});
+    if (e.length === 0) return "—";
+    return e.map(([u, v]) => `${fmtN(v)} ${u}`).join(", ");
+  };
+
+  return (
+    <div>
+      <div className="top-bar">
+        {onClose && <button className="btn-ghost" onClick={onClose}>‹</button>}
+        <h2>Variedades · costo y rendimiento 🧬</h2>
+      </div>
+      <div className="section-pad">
+        <div className="text-xs text-muted mb-3" style={{ paddingLeft: 4 }}>
+          Compara el costo y el rendimiento de cada variedad. Los datos salen de las actividades y cosechas ligadas a cada siembra.
+        </div>
+
+        {cultivos.length === 0 && (
+          <div className="text-muted text-sm" style={{ textAlign: "center", padding: "32px 0" }}>
+            No hay siembras registradas todavía.
+          </div>
+        )}
+
+        {cultivos.map(cul => {
+          const reps = porCultivo[cul].map(s => reporteSiembra(data, s.id)).filter(Boolean);
+          // Ordenar por costo/ha para ver cuál variedad cuesta más por hectárea
+          reps.sort((a, b) => b.porHa - a.porHa);
+          return (
+            <div key={cul} className="card">
+              <div className="card-title">{cul}</div>
+              {reps.map((r, i) => (
+                <div key={i} className="list-item" style={{ flexDirection: "column", alignItems: "stretch", gap: 6, paddingTop: 10, paddingBottom: 10 }}>
+                  <div className="flex-b">
+                    <span className="font-bold">🧬 {r.variedad}</span>
+                    <span className="text-sm text-muted">{r.parcela?.nombre || ""}</span>
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 12, fontSize: 13 }}>
+                    <span>Costo: <b>{fmt(r.total)}</b></span>
+                    {r.costoRepartido > 0 && <span className="text-muted">(incluye {fmt(r.costoRepartido)} repartido)</span>}
+                    <span>Rendimiento: <b>{fmtRend(r.rendimiento)}</b></span>
+                    {r.superficie > 0 && <span>Costo/ha: <b>{fmt(r.porHa)}</b></span>}
+                    {r.rendimientoPorHa > 0 && <span>Rend/ha: <b>{fmtN(r.rendimientoPorHa)}</b></span>}
+                    {r.totalCosechado > 0 && r.total > 0 && <span>Costo/unidad: <b>{fmt(r.total / r.totalCosechado)}</b></span>}
+                    {r.ingresoTotal > 0 && <span>Utilidad: <b style={{ color: r.utilidad >= 0 ? "var(--safe)" : "var(--red)" }}>{fmt(r.utilidad)}</b></span>}
+                  </div>
+                  {r.acts.length === 0 && <div className="text-xs text-muted">Sin actividades registradas aún</div>}
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ════════════ EXPORTAR PÓLIZAS A CONTPAQi ════════════ */
+/* Mapea los movimientos de la app (egresos, ingresos, costos de mano de obra)
+   a pólizas de diario para importar en ContPAQi. El cultivo va como centro de
+   costos. El usuario define una vez las cuentas contables de su catálogo. */
+function ExportarContPAQi({ data, upd, add, session, onClose }) {
+  // El mapeo de cuentas se guarda como un registro único en la colección "config_contpaqi"
+  const cfgExist = (data.config_contpaqi || [])[0];
+  const [cfg, setCfg] = useState(cfgExist || {
+    id: "cfg_contpaqi",
+    cuentaEgresos: "", cuentaIngresos: "", cuentaManoObra: "",
+    contraEgresos: "", contraIngresos: "", contraManoObra: "",
+  });
+  const [desde, setDesde] = useState("");
+  const [hasta, setHasta] = useState(today());
+  const [resultado, setResultado] = useState(null);
+
+  const guardarCfg = () => {
+    if (cfgExist) upd("config_contpaqi", cfg);
+    else add("config_contpaqi", cfg);
+    alert("Cuentas guardadas. Se usarán en las próximas exportaciones.");
+  };
+
+  const cultivoDeParcela = (parcelaId) => {
+    const p = (data.parcelas || []).find(x => x.id === parcelaId);
+    return p ? p.cultivo : "";
+  };
+
+  const exportar = () => {
+    const d = desde || "2000-01-01";
+    const h = hasta || today();
+    const enRango = f => f && f >= d && f <= h;
+    const movimientos = [];
+
+    // Egresos
+    (data.egresos || []).filter(e => enRango(e.fecha)).forEach(e => {
+      movimientos.push({
+        fecha: e.fecha, tipo: "egreso", concepto: e.concepto || "Egreso",
+        monto: e.monto, cuenta: cfg.cuentaEgresos, contracuenta: cfg.contraEgresos,
+        cultivo: cultivoDeParcela(e.parcelaId), referencia: e.proveedor || "",
+      });
+    });
+    // Ingresos
+    (data.ingresos || []).filter(g => enRango(g.fecha)).forEach(g => {
+      movimientos.push({
+        fecha: g.fecha, tipo: "ingreso", concepto: g.concepto || "Ingreso",
+        monto: g.monto, cuenta: cfg.cuentaIngresos, contracuenta: cfg.contraIngresos,
+        cultivo: cultivoDeParcela(g.parcelaId), referencia: g.cliente || "",
+      });
+    });
+    // Costos de mano de obra (de las actividades)
+    (data.actividadesContables || data.actividades || []).filter(a => enRango(a.fecha)).forEach(a => {
+      const mo = parseFloat(a.costoMO) || 0;
+      if (mo <= 0) return;
+      const cultivo = a.esBodega ? a.cultivoBodega : cultivoDeParcela(a.parcelaId);
+      movimientos.push({
+        fecha: a.fecha, tipo: "costoMO", concepto: `Mano de obra: ${a.tipo || "actividad"}`,
+        monto: mo, cuenta: cfg.cuentaManoObra, contracuenta: cfg.contraManoObra,
+        cultivo, referencia: "",
+      });
+    });
+
+    if (movimientos.length === 0) { alert("No hay movimientos en ese rango de fechas."); return; }
+    const r = exportarPolizas(movimientos, { nombreEmpresa: "Agroselectos P&A" });
+    setResultado(r);
+  };
+
+  const faltanCuentas = !cfg.cuentaEgresos && !cfg.cuentaIngresos && !cfg.cuentaManoObra;
+
+  return (
+    <div>
+      <div className="top-bar">
+        {onClose && <button className="btn-ghost" onClick={onClose}>‹</button>}
+        <h2>Exportar a ContPAQi 📑</h2>
+      </div>
+      <div className="section-pad">
+        <div className="text-xs text-muted mb-3" style={{ paddingLeft: 4 }}>
+          Genera un Excel con pólizas de diario (una por día) para importar en ContPAQi. El cultivo va como centro de costos.
+        </div>
+
+        <div className="card">
+          <div className="card-title">1. Cuentas de tu catálogo</div>
+          <div className="text-xs text-muted mb-3">Escribe los números de cuenta de ContPAQi (sin guiones). Se guardan para la próxima vez.</div>
+          <div className="form-group"><label className="form-label">Cuenta de gastos/egresos (cargo)</label><input className="inp" placeholder="Ej: 6000000000" value={cfg.cuentaEgresos} onChange={e => setCfg(c => ({ ...c, cuentaEgresos: e.target.value }))} /></div>
+          <div className="form-group"><label className="form-label">Contracuenta de egresos (abono: banco/caja/proveedores)</label><input className="inp" placeholder="Ej: 1110000000" value={cfg.contraEgresos} onChange={e => setCfg(c => ({ ...c, contraEgresos: e.target.value }))} /></div>
+          <div className="divider" />
+          <div className="form-group"><label className="form-label">Cuenta de ingresos/ventas (abono)</label><input className="inp" placeholder="Ej: 4000000000" value={cfg.cuentaIngresos} onChange={e => setCfg(c => ({ ...c, cuentaIngresos: e.target.value }))} /></div>
+          <div className="form-group"><label className="form-label">Contracuenta de ingresos (cargo: banco/clientes)</label><input className="inp" placeholder="Ej: 1120000000" value={cfg.contraIngresos} onChange={e => setCfg(c => ({ ...c, contraIngresos: e.target.value }))} /></div>
+          <div className="divider" />
+          <div className="form-group"><label className="form-label">Cuenta de mano de obra (cargo)</label><input className="inp" placeholder="Ej: 6000000100" value={cfg.cuentaManoObra} onChange={e => setCfg(c => ({ ...c, cuentaManoObra: e.target.value }))} /></div>
+          <div className="form-group"><label className="form-label">Contracuenta de mano de obra (abono: sueldos por pagar)</label><input className="inp" placeholder="Ej: 2110000000" value={cfg.contraManoObra} onChange={e => setCfg(c => ({ ...c, contraManoObra: e.target.value }))} /></div>
+          <button className="btn btn-outline" onClick={guardarCfg}>Guardar cuentas</button>
+        </div>
+
+        <div className="card">
+          <div className="card-title">2. Periodo a exportar</div>
+          <div className="inp-row">
+            <div className="form-group" style={{ flex: 1 }}><label className="form-label">Desde</label><input type="date" className="inp" value={desde} onChange={e => setDesde(e.target.value)} /></div>
+            <div className="form-group" style={{ flex: 1 }}><label className="form-label">Hasta</label><input type="date" className="inp" value={hasta} onChange={e => setHasta(e.target.value)} max={today()} /></div>
+          </div>
+          {faltanCuentas && <div className="text-xs" style={{ color: "var(--gold)", marginBottom: 8 }}>⚠️ Define al menos una cuenta arriba para que las pólizas salgan completas.</div>}
+          <button className="btn btn-accent" style={{ width: "100%" }} onClick={exportar}>📥 Generar Excel de pólizas</button>
+        </div>
+
+        {resultado && (
+          <div className="card" style={{ background: "rgba(126,200,50,.08)", border: "1px solid rgba(126,200,50,.25)" }}>
+            <div className="text-sm" style={{ color: "var(--safe)", fontWeight: 700 }}>✓ Excel generado</div>
+            <div className="text-sm text-muted mt-1">{resultado.polizas} pólizas · {resultado.movimientos} movimientos. Revísalo antes de importar a ContPAQi.</div>
+          </div>
+        )}
+
+        <div className="card" style={{ background: "rgba(96,165,250,.05)", border: "1px solid rgba(96,165,250,.2)" }}>
+          <div className="text-xs text-muted">💡 Cada movimiento genera dos líneas (cargo y abono) para que la póliza cuadre. Revisa el Excel y ajústalo a tu catálogo antes de importarlo. La estructura exacta de importación puede variar según tu versión de ContPAQi.</div>
+        </div>
       </div>
     </div>
   );
