@@ -7561,6 +7561,8 @@ function RegistroMasivo({ data, add, upd, setInv, session, onClose }) {
   const [obs, setObs] = useState("");
   // Selección de personas: { [id]: { tipo, horas, ha, incluir } }
   const [sel, setSel] = useState({});
+  // Selección de cuadrillas: { [id]: { incluir, modalidad, tarifa, unidades, personas, flete } }
+  const [selCuad, setSelCuad] = useState({});
   const [enviado, setEnviado] = useState(false);
   const [horasComun, setHorasComun] = useState(8);
 
@@ -7586,6 +7588,25 @@ function RegistroMasivo({ data, add, upd, setInv, session, onClose }) {
   const setCampo = (id, campo, val) => setSel(s => ({ ...s, [id]: { ...s[id], [campo]: val } }));
   const seleccionados = personas.filter(p => sel[p.id] && sel[p.id].incluir);
 
+  // --- Cuadrillas ---
+  const toggleCuad = c => setSelCuad(s => {
+    const cur = s[c.id];
+    if (cur && cur.incluir) return { ...s, [c.id]: { ...cur, incluir: false } };
+    return { ...s, [c.id]: { incluir: true, modalidad: "jornal", tarifa: "", unidades: "", personas: c.miembros || 1, flete: c.flete_dia || 0, ha: "" } };
+  });
+  const setCampoCuad = (id, campo, val) => setSelCuad(s => ({ ...s, [id]: { ...s[id], [campo]: val } }));
+  const cuadrillasSel = (data.cuadrillas || []).filter(c => selCuad[c.id] && selCuad[c.id].incluir);
+  // Costo de una cuadrilla según su modalidad
+  const calcCostoCuad = (cfg) => {
+    const tarifa = parseFloat(cfg.tarifa) || 0, unidades = parseFloat(cfg.unidades) || 0;
+    const personas = parseFloat(cfg.personas) || 0, flete = parseFloat(cfg.flete) || 0;
+    if (cfg.modalidad === "jornal") return personas * tarifa + flete;
+    if (cfg.modalidad === "tarea") return tarifa + flete;
+    return tarifa * unidades + flete; // destajo
+  };
+
+  const totalRegistros = seleccionados.length + cuadrillasSel.length;
+
   // Aplicar las horas comunes a todos los seleccionados
   const aplicarHorasATodos = () => setSel(s => {
     const ns = { ...s };
@@ -7595,21 +7616,22 @@ function RegistroMasivo({ data, add, upd, setInv, session, onClose }) {
 
   const enviar = () => {
     if (!parcelaId || !tipo) { alert("Falta parcela o actividad"); return; }
-    if (seleccionados.length === 0) { alert("Selecciona al menos un trabajador"); return; }
+    if (seleccionados.length === 0 && cuadrillasSel.length === 0) { alert("Selecciona al menos un trabajador o cuadrilla"); return; }
     const _sb = siembraEnFecha(data, parcelaId, fecha);
     const maq = data.maquinaria.find(m => m.id === maquinariaId);
-    seleccionados.forEach((p, idx) => {
+    let idxGlobal = 0;
+    // Trabajadores y encargados (por horas)
+    seleccionados.forEach((p) => {
       const cfg = sel[p.id];
       const horas = parseFloat(cfg.horas) || 8;
       const costoMO = (p.sueldo || 0) * (horas / 8);
-      // Solo el primero carga el costo de maquinaria, para no multiplicarlo
-      const costoMaq = (maq && idx === 0) ? maq.costo_hora * horas : 0;
+      const costoMaq = (maq && idxGlobal === 0) ? maq.costo_hora * horas : 0;
       add("actividades", {
-        id: `a${Date.now()}${idx}`, fecha, parcelaId, tipo,
+        id: `a${Date.now()}${idxGlobal}`, fecha, parcelaId, tipo,
         siembraId: _sb?.id || null,
         registradoPor: { tipo: cfg.tipo, id: p.id },
-        maquinariaId: (maquinariaId && idx === 0) ? maquinariaId : null,
-        horas_maq: (maquinariaId && idx === 0) ? horas : 0,
+        maquinariaId: (maquinariaId && idxGlobal === 0) ? maquinariaId : null,
+        horas_maq: (maquinariaId && idxGlobal === 0) ? horas : 0,
         horas_trab: horas,
         insumos: [], costoMO, costoMaq, costoInsumos: 0, costoTotal: costoMO + costoMaq,
         observaciones: obs, flete: 0, extras: {},
@@ -7618,6 +7640,27 @@ function RegistroMasivo({ data, add, upd, setInv, session, onClose }) {
         registroMasivo: true,
         cosecha: null,
       });
+      idxGlobal++;
+    });
+    // Cuadrillas (por modalidad de pago)
+    cuadrillasSel.forEach((c) => {
+      const cfg = selCuad[c.id];
+      const costoMO = calcCostoCuad(cfg);
+      add("actividades", {
+        id: `a${Date.now()}${idxGlobal}`, fecha, parcelaId, tipo,
+        siembraId: _sb?.id || null,
+        registradoPor: { tipo: "cuadrilla", id: c.id },
+        maquinariaId: null, horas_maq: 0, horas_trab: 0,
+        insumos: [], costoMO, costoMaq: 0, costoInsumos: 0, costoTotal: costoMO,
+        observaciones: obs, flete: parseFloat(cfg.flete) || 0,
+        modalidadPago: cfg.modalidad, cuadrilla_tarifa: parseFloat(cfg.tarifa) || 0,
+        cuadrilla_unidades: parseFloat(cfg.unidades) || 0, cuadrilla_personas: parseFloat(cfg.personas) || 0,
+        hectareas_trab: parseFloat(cfg.ha) || 0,
+        registradoEnNombrePor: { rol: session.role, id: session.id, nombre: session.nombre },
+        registroMasivo: true,
+        cosecha: null,
+      });
+      idxGlobal++;
     });
     setEnviado(true);
     setTimeout(() => { setEnviado(false); onClose(); }, 2400);
@@ -7626,7 +7669,7 @@ function RegistroMasivo({ data, add, upd, setInv, session, onClose }) {
   if (enviado) return (
     <div className="success-screen">
       <div className="success-circle">✓</div>
-      <div className="success-title">{seleccionados.length} registros guardados</div>
+      <div className="success-title">{totalRegistros} registros guardados</div>
       <div className="success-sub">{tipo} en {parcelaSel?.nombre}</div>
     </div>
   );
@@ -7733,9 +7776,55 @@ function RegistroMasivo({ data, add, upd, setInv, session, onClose }) {
                 </div>
               );
             })}
+            {(data.cuadrillas || []).length > 0 && (
+              <div style={{ marginTop: 18 }}>
+                <div className="text-sm font-bold mb-2" style={{ paddingLeft: 4 }}>Cuadrillas</div>
+                <div className="text-xs text-muted mb-2" style={{ paddingLeft: 4 }}>Las cuadrillas se pagan por jornal, tarea o destajo (no por horas).</div>
+                {(data.cuadrillas || []).map(c => {
+                  const cfg = selCuad[c.id];
+                  const activo = cfg && cfg.incluir;
+                  return (
+                    <div key={c.id} className={`parcela-card${activo ? " active" : ""}`} style={{ flexDirection: "column", alignItems: "stretch", gap: 8 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }} onClick={() => toggleCuad(c)}>
+                        <div className="parcela-thumb-ph">{activo ? "✅" : "👥"}</div>
+                        <div className="parcela-body"><div className="pc-name">{c.nombre}</div><div className="pc-sub">{c.responsable} · {c.miembros} personas</div></div>
+                      </div>
+                      {activo && (
+                        <div style={{ paddingLeft: 4 }}>
+                          <label className="form-label" style={{ fontSize: 10 }}>Modalidad de pago</label>
+                          <div className="gap-row mb-2">
+                            {[["jornal", "Por jornal"], ["tarea", "Por tarea"], ["destajo", "Destajo"]].map(([v, l]) => (
+                              <button key={v} className={`btn btn-sm ${cfg.modalidad === v ? "btn-accent" : "btn-outline"}`} style={{ flex: 1 }} onClick={() => setCampoCuad(c.id, "modalidad", v)}>{l}</button>
+                            ))}
+                          </div>
+                          <div className="inp-row">
+                            {cfg.modalidad === "jornal" && <>
+                              <div style={{ flex: 1 }}><label className="form-label" style={{ fontSize: 10 }}>Personas</label><input type="number" className="inp" value={cfg.personas} onChange={e => setCampoCuad(c.id, "personas", e.target.value)} /></div>
+                              <div style={{ flex: 1 }}><label className="form-label" style={{ fontSize: 10 }}>$ por persona</label><input type="number" className="inp" value={cfg.tarifa} onChange={e => setCampoCuad(c.id, "tarifa", e.target.value)} /></div>
+                            </>}
+                            {cfg.modalidad === "tarea" && (
+                              <div style={{ flex: 1 }}><label className="form-label" style={{ fontSize: 10 }}>$ por la tarea</label><input type="number" className="inp" value={cfg.tarifa} onChange={e => setCampoCuad(c.id, "tarifa", e.target.value)} /></div>
+                            )}
+                            {cfg.modalidad === "destajo" && <>
+                              <div style={{ flex: 1 }}><label className="form-label" style={{ fontSize: 10 }}>$ por unidad</label><input type="number" className="inp" value={cfg.tarifa} onChange={e => setCampoCuad(c.id, "tarifa", e.target.value)} /></div>
+                              <div style={{ flex: 1 }}><label className="form-label" style={{ fontSize: 10 }}>Unidades</label><input type="number" className="inp" value={cfg.unidades} onChange={e => setCampoCuad(c.id, "unidades", e.target.value)} /></div>
+                            </>}
+                          </div>
+                          <div className="inp-row">
+                            <div style={{ flex: 1 }}><label className="form-label" style={{ fontSize: 10 }}>Flete ($)</label><input type="number" className="inp" value={cfg.flete} onChange={e => setCampoCuad(c.id, "flete", e.target.value)} /></div>
+                            <div style={{ flex: 1 }}><label className="form-label" style={{ fontSize: 10 }}>Hectáreas (opcional)</label><input type="number" className="inp" placeholder="0" value={cfg.ha} onChange={e => setCampoCuad(c.id, "ha", e.target.value)} /></div>
+                          </div>
+                          <div className="text-xs text-muted mt-1" style={{ textAlign: "right" }}>Costo: {fmt(calcCostoCuad(cfg))}</div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
             <div className="gap-row mt-2">
               <button className="btn btn-outline" style={{ flex: "0 0 auto", width: "auto", padding: "14px 20px" }} onClick={() => setPaso(1)}>‹</button>
-              <button className="btn btn-accent" onClick={() => { if (seleccionados.length === 0) { alert("Selecciona al menos uno"); return; } setPaso(3); }}>Continuar →</button>
+              <button className="btn btn-accent" onClick={() => { if (seleccionados.length === 0 && cuadrillasSel.length === 0) { alert("Selecciona al menos uno"); return; } setPaso(3); }}>Continuar →</button>
             </div>
           </>
         )}
@@ -7743,30 +7832,52 @@ function RegistroMasivo({ data, add, upd, setInv, session, onClose }) {
         {paso === 3 && (
           <>
             <div className="big-question">Confirmar registro</div>
-            <div className="big-sub">Se crearán {seleccionados.length} registros de actividad</div>
+            <div className="big-sub">Se crearán {totalRegistros} registros de actividad</div>
             <div className="confirm-card">
               <div className="confirm-row"><span className="cr-label">📍 Parcela</span><span className="cr-val">{parcelaSel?.nombre}</span></div>
               <div className="confirm-row"><span className="cr-label">⚡ Actividad</span><span className="cr-val">{tipo}</span></div>
               <div className="confirm-row"><span className="cr-label">📅 Fecha</span><span className="cr-val">{fecha}</span></div>
               {maquinariaId && <div className="confirm-row"><span className="cr-label">🚜 Maquinaria</span><span className="cr-val">{data.maquinaria.find(m => m.id === maquinariaId)?.nombre}</span></div>}
             </div>
+            {seleccionados.length > 0 && (
+              <div className="card">
+                <div className="card-title">Trabajadores ({seleccionados.length})</div>
+                {seleccionados.map(p => {
+                  const cfg = sel[p.id];
+                  const horas = parseFloat(cfg.horas) || 8;
+                  const costoMO = (p.sueldo || 0) * (horas / 8);
+                  return (
+                    <div key={p.id} className="list-item">
+                      <div className="li-icon">{p.tipo === "encargado" ? "🧰" : "👷"}</div>
+                      <div className="li-body"><div className="li-title">{p.nombre}</div><div className="li-sub">{horas} h{cfg.ha ? ` · ${cfg.ha} ha` : ""}</div></div>
+                      <div className="li-right"><div className="li-val">{fmt(costoMO)}</div></div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {cuadrillasSel.length > 0 && (
+              <div className="card">
+                <div className="card-title">Cuadrillas ({cuadrillasSel.length})</div>
+                {cuadrillasSel.map(c => {
+                  const cfg = selCuad[c.id];
+                  return (
+                    <div key={c.id} className="list-item">
+                      <div className="li-icon">👥</div>
+                      <div className="li-body"><div className="li-title">{c.nombre}</div><div className="li-sub">{cfg.modalidad}{cfg.ha ? ` · ${cfg.ha} ha` : ""}</div></div>
+                      <div className="li-right"><div className="li-val">{fmt(calcCostoCuad(cfg))}</div></div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
             <div className="card">
-              <div className="card-title">Trabajadores ({seleccionados.length})</div>
-              {seleccionados.map(p => {
-                const cfg = sel[p.id];
-                const horas = parseFloat(cfg.horas) || 8;
-                const costoMO = (p.sueldo || 0) * (horas / 8);
-                return (
-                  <div key={p.id} className="list-item">
-                    <div className="li-icon">{p.tipo === "encargado" ? "🧰" : "👷"}</div>
-                    <div className="li-body"><div className="li-title">{p.nombre}</div><div className="li-sub">{horas} h{cfg.ha ? ` · ${cfg.ha} ha` : ""}</div></div>
-                    <div className="li-right"><div className="li-val">{fmt(costoMO)}</div></div>
-                  </div>
-                );
-              })}
-              <div className="flex-b" style={{ paddingTop: 10, borderTop: "2px solid var(--accent)", marginTop: 8 }}>
+              <div className="flex-b">
                 <span className="font-bold">Costo total de mano de obra</span>
-                <span className="font-bold text-accent">{fmt(seleccionados.reduce((s, p) => s + (p.sueldo || 0) * ((parseFloat(sel[p.id].horas) || 8) / 8), 0))}</span>
+                <span className="font-bold text-accent">{fmt(
+                  seleccionados.reduce((s, p) => s + (p.sueldo || 0) * ((parseFloat(sel[p.id].horas) || 8) / 8), 0)
+                  + cuadrillasSel.reduce((s, c) => s + calcCostoCuad(selCuad[c.id]), 0)
+                )}</span>
               </div>
             </div>
             <div className="form-group"><label className="form-label">Notas (opcional)</label>
@@ -7774,7 +7885,7 @@ function RegistroMasivo({ data, add, upd, setInv, session, onClose }) {
             </div>
             <div className="gap-row">
               <button className="btn btn-outline" style={{ flex: "0 0 auto", width: "auto", padding: "14px 20px" }} onClick={() => setPaso(2)}>‹</button>
-              <button className="btn btn-accent" onClick={enviar}>✓ Registrar {seleccionados.length} actividades</button>
+              <button className="btn btn-accent" onClick={enviar}>✓ Registrar {totalRegistros} actividades</button>
             </div>
           </>
         )}
