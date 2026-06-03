@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo, Component } from "react";
 import { supabase, supabaseListo, cuentaTecnicaListo, iniciarConCuentaTecnica } from "./supabase";
-import { migrarCatalogos, leerTodo, CATALOGOS, subirColeccion, guardarRegistro, borrarRegistro } from "./dataApi";
+import { migrarCatalogos, leerTodo, CATALOGOS, subirColeccion, guardarRegistro, borrarRegistro, vaciarTabla } from "./dataApi";
 import { generarPlantilla, leerExcel, excelAColecciones, validar, generarSQLCuentas, HOJAS } from "./excelLoader";
 
 /* ════════════ LOGO ════════════ */
@@ -7455,6 +7455,11 @@ function EditorRegistro({ seccion, registro, campos, titulo, upd, del, onClose }
 function RespaldoDatos({ data, setData, onClose }) {
   const [msg, setMsg] = useState(null);
   const fileRef = useRef(null);
+  const [reseteando, setReseteando] = useState(false);
+
+  // Clasificación de colecciones
+  const MOVIMIENTOS = ["siembras", "actividades", "bonificaciones", "incidencias", "entradas_inv", "cosechas", "ingresos", "egresos", "compras", "solicitudes_compra", "bitacora", "avances_fase", "tareas", "prestamos", "cajachica", "creditos", "ciclos", "asistencia", "aplicaciones", "envios_bodega"];
+  const CATALOGOS_COL = ["ranchos", "parcelas", "cultivos", "trabajadores", "cuadrillas", "externos", "maquinaria", "encargados", "proveedores", "agronomos"];
 
   const exportar = () => {
     try {
@@ -7494,6 +7499,59 @@ function RespaldoDatos({ data, setData, onClose }) {
       }
     };
     reader.readAsText(file);
+  };
+
+  // Reinicio de datos. modo: "movimientos" | "todo" | "inventario"
+  const reiniciar = async (modo) => {
+    let coleccionesABorrar = [];
+    let descripcion = "";
+    if (modo === "movimientos") {
+      coleccionesABorrar = MOVIMIENTOS;
+      descripcion = "todos los movimientos (actividades, compras, cosechas, ingresos, egresos, etc.)";
+    } else if (modo === "todo") {
+      coleccionesABorrar = [...MOVIMIENTOS, ...CATALOGOS_COL, "inventario"];
+      descripcion = "TODOS los datos (movimientos Y catálogos: parcelas, trabajadores, cultivos, todo)";
+    } else if (modo === "inventario") {
+      coleccionesABorrar = []; // el inventario no se borra, se pone existencia en cero
+      descripcion = "las existencias del inventario (se quedan en cero, sin borrar los insumos)";
+    }
+
+    // Confirmación 1
+    if (!confirm(`Vas a borrar ${descripcion}.\n\nEsto NO se puede deshacer. ¿Descargaste un respaldo?\n\nToca Aceptar solo si estás seguro.`)) return;
+    // Confirmación 2: escribir BORRAR
+    const palabra = prompt(`Para confirmar, escribe la palabra:\n\nBORRAR`);
+    if (palabra !== "BORRAR") { setMsg({ tipo: "err", txt: "Reinicio cancelado (no se escribió BORRAR)." }); return; }
+
+    setReseteando(true);
+    try {
+      // 1. Actualizar local
+      setData(prev => {
+        const next = { ...prev };
+        if (modo === "inventario") {
+          next.inventario = (prev.inventario || []).map(i => ({ ...i, existencia: 0 }));
+        } else {
+          coleccionesABorrar.forEach(c => { next[c] = []; });
+        }
+        return next;
+      });
+      // 2. Replicar a la nube (vaciar tablas)
+      if (supabaseListo) {
+        if (modo === "inventario") {
+          // Re-subir inventario con existencia en cero
+          const invCero = (data.inventario || []).map(i => ({ ...i, existencia: 0 }));
+          try { await subirColeccion("inventario", invCero); } catch (e) { console.warn("inventario nube:", e?.message); }
+        } else {
+          for (const c of coleccionesABorrar) {
+            try { await vaciarTabla(c); } catch (e) { console.warn(`vaciar ${c}:`, e?.message); }
+          }
+        }
+      }
+      setMsg({ tipo: "ok", txt: "Listo. Los datos se reiniciaron correctamente." });
+    } catch (e) {
+      setMsg({ tipo: "err", txt: "Hubo un problema al reiniciar: " + (e?.message || "") });
+    } finally {
+      setReseteando(false);
+    }
   };
 
   // Conteo rápido de lo que hay
@@ -7541,8 +7599,41 @@ function RespaldoDatos({ data, setData, onClose }) {
           <button className="btn btn-outline" onClick={() => fileRef.current && fileRef.current.click()}>📤 Elegir archivo de respaldo</button>
         </div>
 
-        <div className="card" style={{ background: "rgba(245,166,35,.05)", border: "1px solid rgba(245,166,35,.2)" }}>
-          <div className="text-xs text-muted">Mientras la app no tenga base de datos en línea, la información vive solo en este dispositivo. Te recomendamos descargar un respaldo cada cierto tiempo, sobre todo durante las pruebas.</div>
+        {/* ZONA DE REINICIO — peligrosa, va al final y bien marcada */}
+        <div className="card" style={{ border: "1px solid rgba(232,90,82,.4)", background: "rgba(232,90,82,.04)" }}>
+          <div className="card-title" style={{ color: "var(--red)" }}>⚠️ Reiniciar datos</div>
+          <div className="text-xs text-muted mb-3">
+            Esto borra datos de forma permanente. Úsalo para limpiar lo capturado durante las pruebas antes de arrancar en serio.
+            <b> Descarga un respaldo antes</b> (botón de arriba). Cada opción pide confirmación y escribir la palabra BORRAR.
+          </div>
+
+          <div style={{ marginBottom: 10 }}>
+            <button className="btn btn-outline" style={{ width: "100%", borderColor: "var(--red)", color: "var(--red)" }}
+                    disabled={reseteando} onClick={() => reiniciar("movimientos")}>
+              Borrar solo movimientos
+            </button>
+            <div className="text-xs text-muted" style={{ marginTop: 4, paddingLeft: 2 }}>Borra actividades, compras, cosechas, dinero, etc. <b>Conserva</b> tus parcelas, trabajadores y cultivos.</div>
+          </div>
+
+          <div style={{ marginBottom: 10 }}>
+            <button className="btn btn-outline" style={{ width: "100%", borderColor: "var(--red)", color: "var(--red)" }}
+                    disabled={reseteando} onClick={() => reiniciar("inventario")}>
+              Poner inventario en cero
+            </button>
+            <div className="text-xs text-muted" style={{ marginTop: 4, paddingLeft: 2 }}>Deja las existencias en cero sin borrar el catálogo de insumos.</div>
+          </div>
+
+          <div>
+            <button className="btn btn-danger" style={{ width: "100%" }}
+                    disabled={reseteando} onClick={() => reiniciar("todo")}>
+              Borrar TODO (volver a cero)
+            </button>
+            <div className="text-xs text-muted" style={{ marginTop: 4, paddingLeft: 2 }}>Borra movimientos Y catálogos. La app queda como recién instalada. Tendrás que volver a subir el Excel.</div>
+          </div>
+        </div>
+
+        <div className="card" style={{ background: "rgba(126,200,50,.05)", border: "1px solid rgba(126,200,50,.2)" }}>
+          <div className="text-xs text-muted">Tus datos se guardan en este dispositivo y se sincronizan con la nube. Aun así, te recomendamos descargar un respaldo de vez en cuando, sobre todo antes de reiniciar datos o hacer cambios grandes.</div>
         </div>
       </div>
     </div>

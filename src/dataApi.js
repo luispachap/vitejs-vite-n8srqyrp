@@ -165,6 +165,19 @@ export async function borrarRegistro(tabla, id) {
 }
 
 // ------------------------------------------------------------
+//  VACIAR UNA TABLA COMPLETA en Supabase (borra todas sus filas).
+//  Usado por el reinicio de datos. Úsese con cuidado: es irreversible.
+// ------------------------------------------------------------
+export async function vaciarTabla(tabla) {
+  if (!supabaseListo) throw new Error("Supabase no está configurado");
+  // Borra todas las filas. El filtro "id no es nulo" es un truco para
+  // que Supabase permita un delete masivo (requiere un filtro).
+  const { error } = await supabase.from(tabla).delete().not("id", "is", null);
+  if (error) throw error;
+  return true;
+}
+
+// ------------------------------------------------------------
 //  SUBIR EN BLOQUE: una colección completa de la app a Supabase.
 //  Usado en la migración inicial.
 // ------------------------------------------------------------
