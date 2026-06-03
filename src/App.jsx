@@ -1677,6 +1677,36 @@ function AppInner() {
     replicarANube("del", sec, id);
   }, [setData, replicarANube]);
 
+  // Aplica VARIAS operaciones en una sola actualización de datos (un solo re-render).
+  // Útil para acciones que crean/editan muchos registros de golpe (ej. confirmar una compra),
+  // donde llamar add/upd uno por uno causaría muchos renders seguidos y bloquearía la UI.
+  // ops: [{ tipo: "add"|"upd", sec, item }]. Devuelve los items finales (con id asignado).
+  const aplicarLote = useCallback((ops) => {
+    const resueltos = ops.map(o => {
+      if (o.tipo === "add") {
+        const ni = { ...o.item, id: o.item.id || `${o.sec[0]}${Date.now()}${Math.floor(Math.random() * 100000)}` };
+        return { ...o, item: ni };
+      }
+      return o;
+    });
+    // Un solo setData que aplica todo
+    setData(d => {
+      const next = { ...d };
+      resueltos.forEach(o => {
+        const col = Array.isArray(next[o.sec]) ? next[o.sec] : [];
+        if (o.tipo === "add") {
+          next[o.sec] = [...col, o.item];
+        } else { // upd
+          next[o.sec] = col.some(x => x.id === o.item.id) ? col.map(x => x.id === o.item.id ? o.item : x) : [...col, o.item];
+        }
+      });
+      return next;
+    });
+    // Replicar cada una a la nube (asíncrono, no bloquea)
+    resueltos.forEach(o => replicarANube(o.tipo, o.sec, o.item));
+    return resueltos.map(o => o.item);
+  }, [setData, replicarANube]);
+
   // setInv: cambia el stock de un insumo. Si recibe `movimiento` (con concepto, parcela, etc),
   // también registra el movimiento como un renglón en entradas_inv (con cantidad negativa si es salida).
   const setInv = useCallback((id, delta, movimiento) => {
@@ -1821,7 +1851,7 @@ function AppInner() {
               {page === "respaldo" && <RespaldoDatos data={data} setData={setData} onClose={() => setPage("home")} />}
               {page === "panel-financiero" && <PanelFinanciero data={data} onClose={() => setPage("home")} />}
               {page === "subir-nube" && <SubirCatalogos data={data} setData={setData} session={session} onClose={() => setPage("home")} />}
-              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
+              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} setInv={setInv} aplicarLote={aplicarLote} session={session} onClose={() => setPage("home")} />}
               {page === "operacion" && <PanelOperacion data={data} onClose={() => setPage("home")} onVerParcela={() => setPage("calendario")} />}
               {/* Funciones de gestión heredadas de otros perfiles (el admin puede todo) */}
               {page === "indicaciones" && <AgronomoIndicaciones data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
@@ -1848,7 +1878,7 @@ function AppInner() {
               {page === "cosechas" && <GestionCosechas data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
               {page === "asistencia" && <GestionAsistencia data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
               {page === "aprobacion-externos" && <AprobacionExternos data={data} upd={upd} onBack={() => setPage("home")} />}
-              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
+              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} setInv={setInv} aplicarLote={aplicarLote} session={session} onClose={() => setPage("home")} />}
               {page === "operacion" && <PanelOperacion data={data} onClose={() => setPage("home")} />}
             </>}
             {isTrab && <>
@@ -1856,7 +1886,7 @@ function AppInner() {
               {page === "mis" && <TrabHistorial data={data} add={add} upd={upd} session={session} onLogout={cerrarSesion} />}
               {page === "compras" && <TrabCompras data={data} add={add} setInv={setInv} session={session} online={online} onLogout={cerrarSesion} />}
               {page === "reporte" && <TrabReporte data={data} add={add} session={session} onLogout={cerrarSesion} />}
-              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
+              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} setInv={setInv} aplicarLote={aplicarLote} session={session} onClose={() => setPage("home")} />}
             </>}
             {isCuad && <>
               {page === "home" && <CuadrillaReg data={data} add={add} upd={upd} setInv={setInv} session={session} online={online} onLogout={cerrarSesion} />}
@@ -1876,7 +1906,7 @@ function AppInner() {
               {page === "indicaciones" && <AgronomoIndicaciones data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
               {page === "compras-insumos" && <AgronomoCompras data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
               {page === "reporte" && <TrabReporte data={data} add={add} session={session} onLogout={cerrarSesion} />}
-              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
+              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} setInv={setInv} aplicarLote={aplicarLote} session={session} onClose={() => setPage("home")} />}
               {page === "operacion" && <PanelOperacion data={data} onClose={() => setPage("home")} />}
             </>}
             {isDueno && <>
@@ -1892,7 +1922,7 @@ function AppInner() {
               {page === "proyeccion" && <ProyeccionSemanal data={data} onClose={() => setPage("home")} />}
               {page === "deudas" && <GestionDeudas data={data} add={add} upd={upd} del={del} session={session} onClose={() => setPage("home")} />}
               {page === "contabilidad" && <AdminContabilidad data={data} add={add} upd={upd} del={del} setInv={setInv} />}
-              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} setInv={setInv} session={session} onClose={() => setPage("home")} />}
+              {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} setInv={setInv} aplicarLote={aplicarLote} session={session} onClose={() => setPage("home")} />}
               {page === "operacion" && <PanelOperacion data={data} onClose={() => setPage("home")} />}
             </>}
           </ErrorBoundary>
@@ -9087,7 +9117,7 @@ function CompletarIndicacionModal({ tarea, data, add, upd, setInv, session, onCl
 /* ════════════ SOLICITUDES DE COMPRA ════════════ */
 /* Cualquiera crea solicitudes itemizadas. Finanzas/admin/encargados las gestionan.
    Botón de WhatsApp para cotizar con proveedores. */
-function SolicitudesCompra({ data, add, upd, del, setInv, session, onClose }) {
+function SolicitudesCompra({ data, add, upd, del, setInv, aplicarLote, session, onClose }) {
   const rol = session.role;
   const puedeGestionar = ["admin", "finanzas", "encargado", "dueno"].includes(rol);
   const puedeConfirmarCompra = ["admin", "finanzas"].includes(rol);
@@ -9244,7 +9274,7 @@ function SolicitudesCompra({ data, add, upd, del, setInv, session, onClose }) {
         </div>
         {confirmarCompra && (
           <ConfirmarCompraModal
-            solicitud={confirmarCompra} data={data} add={add} upd={upd} setInv={setInv} session={session}
+            solicitud={confirmarCompra} data={data} add={add} upd={upd} setInv={setInv} aplicarLote={aplicarLote} session={session}
             onClose={() => setConfirmarCompra(null)}
             onHecho={() => { setConfirmarCompra(null); }}
           />
@@ -9373,7 +9403,7 @@ function SolicitudesCompra({ data, add, upd, del, setInv, session, onClose }) {
 /* Convierte una solicitud en compra real: cada item entra al inventario
    (subiendo existencia y recalculando costo promedio) y genera su egreso
    en finanzas. La solicitud queda marcada como "comprada". */
-function ConfirmarCompraModal({ solicitud, data, add, upd, setInv, session, onClose, onHecho }) {
+function ConfirmarCompraModal({ solicitud, data, add, upd, setInv, aplicarLote, session, onClose, onHecho }) {
   // Pre-llenar cada item de la solicitud con: insumo destino, cantidad y costo.
   // Si el item ya venía ligado a un insumo del inventario, se respeta.
   const [lineas, setLineas] = useState(() => (solicitud.items || []).map(it => {
@@ -9411,48 +9441,52 @@ function ConfirmarCompraModal({ solicitud, data, add, upd, setInv, session, onCl
     if (guardando) return;
     setGuardando(true);
 
-    lineas.forEach(l => {
+    // Armar TODAS las operaciones en un solo lote (un solo re-render).
+    const ops = [];
+    const ts = Date.now();
+    lineas.forEach((l, idx) => {
       const cant = parseFloat(l.cantidad) || 0;
       const costo = parseFloat(l.costoTotal) || 0;
       let insumoId = l.insumoId;
       let nombreInsumo = "";
 
       if (insumoId === "__nuevo__") {
-        const nuevo = add("inventario", {
-          nombre: l.nombreNuevo.trim(), cat: l.cat, unidad: l.unidad,
+        insumoId = `inv${ts}_${idx}`;
+        nombreInsumo = l.nombreNuevo.trim();
+        ops.push({ tipo: "add", sec: "inventario", item: {
+          id: insumoId, nombre: nombreInsumo, cat: l.cat, unidad: l.unidad,
           existencia: cant, costo_unit: cant > 0 ? costo / cant : 0, minimo: 0, emoji: "🧪",
-        });
-        insumoId = nuevo.id; nombreInsumo = l.nombreNuevo.trim();
+        }});
       } else {
         const inv = (data.inventario || []).find(i => i.id === insumoId);
         if (!inv) return;
         nombreInsumo = inv.nombre;
         const nuevaExist = (inv.existencia || 0) + cant;
         const nuevoCostoProm = nuevaExist > 0 ? ((inv.existencia || 0) * (inv.costo_unit || 0) + costo) / nuevaExist : 0;
-        upd("inventario", { ...inv, existencia: nuevaExist, costo_unit: nuevoCostoProm });
+        ops.push({ tipo: "upd", sec: "inventario", item: { ...inv, existencia: nuevaExist, costo_unit: nuevoCostoProm } });
       }
 
-      // Egreso por cada item (trazabilidad fina en finanzas)
       if (costo > 0) {
-        add("egresos", {
-          fecha, concepto: `Compra: ${nombreInsumo}`, categoria: "insumos",
-          monto: costo, proveedor,
-          solicitudId: solicitud.id,
+        ops.push({ tipo: "add", sec: "egresos", item: {
+          id: `e${ts}_${idx}`, fecha, concepto: `Compra: ${nombreInsumo}`, categoria: "insumos",
+          monto: costo, proveedor, solicitudId: solicitud.id,
           registradoPor: { rol: session.role, id: session.id, nombre: session.nombre || "" },
-        });
+        }});
       }
-      // Registro de entrada de inventario
-      add("entradas_inv", {
-        fecha, insumoId, cantidad: cant, costo_total: costo, proveedor, factura: "",
+      ops.push({ tipo: "add", sec: "entradas_inv", item: {
+        id: `ei${ts}_${idx}`, fecha, insumoId, cantidad: cant, costo_total: costo, proveedor, factura: "",
         concepto: "Compra desde solicitud",
-      });
+      }});
     });
 
-    // Marcar la solicitud como comprada
-    upd("solicitudes_compra", {
+    // Marcar la solicitud como comprada (misma operación en lote)
+    ops.push({ tipo: "upd", sec: "solicitudes_compra", item: {
       ...solicitud, estado: "comprada",
       compraInfo: { fecha, proveedor, total: totalCompra, confirmadaPor: { id: session.id, nombre: session.nombre || "" } },
-    });
+    }});
+
+    // Aplicar TODO de una vez (un solo render, sin bloqueo)
+    aplicarLote(ops);
 
     alert("Compra registrada: los productos entraron al inventario y el gasto quedó en finanzas.");
     onHecho && onHecho();
