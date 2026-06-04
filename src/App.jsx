@@ -827,73 +827,6 @@ function fraccionReparto(data, actividad, siembraId) {
   return 1 / activas.length; // partes iguales si no hay superficies
 }
 
-// Reporte de UNA siembra concreta (cultivo + variedad). Junta las actividades
-// ligadas directamente a esa siembra, MÁS la parte proporcional de las actividades
-// marcadas "a repartir" de su parcela. Base de "costo y rendimiento por variedad".
-function reporteSiembra(data, siembraId) {
-  const si = (data.siembras || []).find(s => s.id === siembraId);
-  if (!si) return null;
-  const todas = (data.actividadesContables || data.actividades || []);
-  // Actividades ligadas DIRECTAMENTE a esta siembra
-  const acts = todas.filter(a => a.siembraId === siembraId);
-  // Actividades "a repartir" de esta parcela: aportan una fracción proporcional
-  const aRepartir = todas.filter(a => a.siembraId === "__repartir__" && a.parcelaId === si.parcelaId);
-  let costoActs = acts.reduce((s, a) => s + costoActividad(a), 0);
-  let mo = acts.reduce((s, a) => s + (a.costoMO || 0), 0);
-  let ins = acts.reduce((s, a) => s + (a.costoInsumos || 0), 0);
-  let maq = acts.reduce((s, a) => s + (a.costoMaq || 0), 0);
-  // Agrupar por actividad (las directas)
-  const porActividad = {};
-  acts.forEach(a => {
-    if (!porActividad[a.tipo]) porActividad[a.tipo] = { tipo: a.tipo, total: 0, mo: 0, ins: 0, maq: 0, count: 0 };
-    const g = porActividad[a.tipo];
-    g.total += costoActividad(a); g.mo += a.costoMO || 0; g.ins += a.costoInsumos || 0; g.maq += a.costoMaq || 0; g.count++;
-  });
-  // Sumar la parte proporcional de las actividades a repartir
-  let costoRepartido = 0;
-  aRepartir.forEach(a => {
-    const frac = fraccionReparto(data, a, siembraId);
-    if (frac <= 0) return;
-    const cTot = costoActividad(a) * frac, cMo = (a.costoMO || 0) * frac, cIns = (a.costoInsumos || 0) * frac, cMaq = (a.costoMaq || 0) * frac;
-    costoActs += cTot; mo += cMo; ins += cIns; maq += cMaq; costoRepartido += cTot;
-    const tipo = `${a.tipo} (repartido)`;
-    if (!porActividad[tipo]) porActividad[tipo] = { tipo, total: 0, mo: 0, ins: 0, maq: 0, count: 0, repartido: true };
-    const g = porActividad[tipo];
-    g.total += cTot; g.mo += cMo; g.ins += cIns; g.maq += cMaq; g.count++;
-  });
-  const total = costoActs;
-  // Rendimiento: registros de cosecha ligados a esta siembra (viven dentro de cosechas[].registros)
-  const rendimiento = {};
-  let totalCosechado = 0;
-  const cosechasS = [];
-  (data.cosechas || []).forEach(c => {
-    (c.registros || []).forEach(r => {
-      if (r.siembraId === siembraId) {
-        const u = r.unidad || c.unidad || "u";
-        rendimiento[u] = (rendimiento[u] || 0) + (parseFloat(r.cantidad) || 0);
-        totalCosechado += parseFloat(r.cantidad) || 0;
-        cosechasS.push(r);
-      }
-    });
-  });
-  // Ingresos ligados a esta siembra (si se capturan así)
-  const ingresosS = (data.ingresos || []).filter(g => g.siembraId === siembraId);
-  const ingresoTotal = ingresosS.reduce((s, g) => s + g.monto, 0);
-  const p = data.parcelas.find(x => x.id === si.parcelaId);
-  // Superficie de la siembra: la propia si se capturó, o la de la parcela
-  const superficie = parseFloat(si.superficie) || (p ? p.hectareas : 0) || 0;
-  return {
-    siembra: si, cultivo: si.cultivoNombre, variedad: si.variedadNombre || "(sin variedad)",
-    parcela: p, acts, total, mo, ins, maq,
-    porActividad: Object.values(porActividad).sort((a, b) => b.total - a.total),
-    rendimiento, cosechas: cosechasS,
-    ingresos: ingresosS, ingresoTotal, utilidad: ingresoTotal - total,
-    superficie, porHa: superficie ? total / superficie : 0,
-    costoRepartido,
-    rendimientoPorHa: superficie ? totalCosechado / superficie : 0,
-    totalCosechado,
-  };
-}
 
 // Reporte por cultivo: agrupa todas las parcelas del mismo cultivo
 function reporteCultivo(data, cultivo) {
@@ -937,11 +870,45 @@ function reporteCultivo(data, cultivo) {
   const totalBodega = moBodega + insBodega + maqBodega;
   total += totalBodega; mo += moBodega; ins += insBodega; maq += maqBodega;
 
+  // PIEZA 2: gastos generales de bodega (no son de ningún cultivo: reparar, construir...).
+  // Se reparten entre todos los cultivos PROPORCIONAL al costo directo acumulado de cada uno.
+  const gastosGenerales = (data.actividadesContables || data.actividades || [])
+    .filter(a => a.esBodega && a.cultivoBodega === "__general__");
+  let gastoGeneralRepartido = 0;
+  if (gastosGenerales.length > 0) {
+    const totalGeneral = gastosGenerales.reduce((s, a) => s + ((a.costoMO || 0) + (a.costoMaq || 0) + (a.costoInsumos || 0)), 0);
+    // Costo directo de cada cultivo = suma de costos de sus parcelas + su bodega (SIN generales)
+    const cultivosTodos = [...new Set((data.cultivos || []).map(c => c.nombre))].filter(Boolean);
+    const directoPorCultivo = {};
+    let sumaDirectos = 0;
+    cultivosTodos.forEach(cul => {
+      const parcCul = data.parcelas.filter(p => p.cultivo === cul);
+      const dirParc = parcCul.reduce((s, p) => s + reporteParcela(data, p.id).total, 0);
+      const dirBod = (data.actividadesContables || data.actividades || [])
+        .filter(a => a.esBodega && a.cultivoBodega === cul)
+        .reduce((s, a) => s + ((a.costoMO || 0) + (a.costoMaq || 0) + (a.costoInsumos || 0)), 0);
+      directoPorCultivo[cul] = dirParc + dirBod;
+      sumaDirectos += dirParc + dirBod;
+    });
+    // La fracción de este cultivo
+    const miDirecto = directoPorCultivo[cultivo] || 0;
+    const frac = sumaDirectos > 0 ? miDirecto / sumaDirectos : (cultivosTodos.length ? 1 / cultivosTodos.length : 0);
+    gastoGeneralRepartido = totalGeneral * frac;
+    if (gastoGeneralRepartido > 0) {
+      total += gastoGeneralRepartido;
+      porActividad["Gastos generales (repartido)"] = {
+        tipo: "Gastos generales (repartido)", total: gastoGeneralRepartido,
+        mo: 0, ins: 0, maq: 0, count: gastosGenerales.length, repartido: true, esBodega: true,
+      };
+    }
+  }
+
   return {
     cultivo, parcelas, total, mo, ins, maq, hectareas, ingresoTotal,
     porHa: hectareas ? total / hectareas : 0,
     utilidad: ingresoTotal - total,
     costoBodega: totalBodega,
+    gastoGeneralRepartido,
     porActividad: Object.values(porActividad).sort((a, b) => b.total - a.total),
     porInsumo: Object.values(porInsumo).sort((a, b) => b.costo - a.costo),
     subreportes,
@@ -1309,25 +1276,61 @@ function reporteSiembra(data, siembraId) {
     if (!porInsumo[k]) porInsumo[k] = { nombre: i.nombre, emoji: i.emoji, unidad: i.unidad, cantidad: 0, costo: 0 };
     porInsumo[k].cantidad += i.cantidad; porInsumo[k].costo += i.costo;
   }));
-  // Cosecha de la siembra
+  // Cosecha de la siembra: preferir registros ligados por siembraId; si no hay,
+  // usar los del rango de fechas de la parcela (compatibilidad con datos viejos).
   let cosechaTotal = 0, cosechaUnidad = "kg";
+  const rendimiento = {};
+  let huboLigaSiembra = false;
   (data.cosechas || []).filter(c => c.parcelaId === si.parcelaId).forEach(c => {
     cosechaUnidad = c.unidad || cosechaUnidad;
-    (c.registros || []).forEach(r => { if (enRango(r.fecha)) cosechaTotal += parseFloat(r.cantidad) || 0; });
-    (c.ajustes || []).forEach(aj => { if (enRango(aj.fecha)) cosechaTotal += parseFloat(aj.delta) || 0; });
+    (c.registros || []).forEach(r => {
+      if (r.siembraId === si.id) { huboLigaSiembra = true; }
+    });
   });
+  (data.cosechas || []).filter(c => c.parcelaId === si.parcelaId).forEach(c => {
+    const u = c.unidad || "kg";
+    (c.registros || []).forEach(r => {
+      // Si hay registros ligados a esta siembra, contar solo esos; si no, por rango.
+      const cuenta = huboLigaSiembra ? (r.siembraId === si.id) : enRango(r.fecha);
+      if (cuenta) { cosechaTotal += parseFloat(r.cantidad) || 0; rendimiento[u] = (rendimiento[u] || 0) + (parseFloat(r.cantidad) || 0); }
+    });
+    (c.ajustes || []).forEach(aj => { if (!huboLigaSiembra && enRango(aj.fecha)) cosechaTotal += parseFloat(aj.delta) || 0; });
+  });
+
+  // Reparto proporcional: actividades marcadas "a repartir" en esta parcela
+  let costoRepartido = 0, moRep = 0, insRep = 0, maqRep = 0;
+  (data.actividadesContables || data.actividades || [])
+    .filter(a => a.siembraId === "__repartir__" && a.parcelaId === si.parcelaId)
+    .forEach(a => {
+      const frac = fraccionReparto(data, a, si.id);
+      if (frac <= 0) return;
+      const cTot = (a.costoTotal || 0) * frac;
+      costoRepartido += cTot; moRep += (a.costoMO || 0) * frac; insRep += (a.costoInsumos || 0) * frac; maqRep += (a.costoMaq || 0) * frac;
+      const tipo = `${a.tipo} (repartido)`;
+      if (!porActividad[tipo]) porActividad[tipo] = { tipo, total: 0, mo: 0, ins: 0, maq: 0, count: 0, repartido: true };
+      const g = porActividad[tipo];
+      g.total += cTot; g.mo += (a.costoMO || 0) * frac; g.ins += (a.costoInsumos || 0) * frac; g.maq += (a.costoMaq || 0) * frac; g.count++;
+    });
+  const totalConReparto = total + costoRepartido;
+  const superficie = parseFloat(si.superficie) || (p ? p.hectareas : 0) || 0;
   return {
-    si, p, total, mo, ins, maq, costoActs, costoEgr, costoComp, ingresoTotal,
-    utilidad: ingresoTotal - total,
-    porHa: p && p.hectareas ? total / p.hectareas : 0,
+    si, p, total: totalConReparto, mo: mo + moRep, ins: ins + insRep, maq: maq + maqRep,
+    costoActs, costoEgr, costoComp, ingresoTotal,
+    utilidad: ingresoTotal - totalConReparto,
+    porHa: superficie ? totalConReparto / superficie : 0,
     porActividad: Object.values(porActividad).sort((a, b) => b.total - a.total),
     porInsumo: Object.values(porInsumo).sort((a, b) => b.costo - a.costo),
     cosechaTotal, cosechaUnidad,
-    costoPorUnidad: cosechaTotal > 0 ? total / cosechaTotal : 0,
-    rendimientoHa: p && p.hectareas ? cosechaTotal / p.hectareas : 0,
+    costoPorUnidad: cosechaTotal > 0 ? totalConReparto / cosechaTotal : 0,
+    rendimientoHa: superficie ? cosechaTotal / superficie : 0,
     presupuesto: si.presupuesto || 0,
-    avancePresupuesto: si.presupuesto > 0 ? (total / si.presupuesto) * 100 : 0,
+    avancePresupuesto: si.presupuesto > 0 ? (totalConReparto / si.presupuesto) * 100 : 0,
     acts, ingresos: ing,
+    // Campos para el reporte de variedades (Capa 3)
+    cultivo: si.cultivoNombre, variedad: si.variedadNombre || "(sin variedad)",
+    parcela: p, rendimiento, costoRepartido,
+    superficie, rendimientoPorHa: superficie ? cosechaTotal / superficie : 0,
+    totalCosechado: cosechaTotal,
   };
 }
 
@@ -1735,7 +1738,25 @@ function AppInner() {
   // normalizeData incluye el cálculo de mano de obra (recorre todas las actividades),
   // así que lo memorizamos: solo se recalcula cuando rawData cambia, no en cada render.
   const data = useMemo(() => normalizeData(rawData), [rawData]);
-  const [session, setSession] = useState(null);
+  const [session, setSessionRaw] = useState(null);
+  // Restaurar sesión guardada (PIN o cuenta) al abrir la app, para no re-loguear cada vez.
+  useEffect(() => {
+    try {
+      const guardada = localStorage.getItem("agro_session_v1");
+      if (guardada) {
+        const s = JSON.parse(guardada);
+        if (s && s.role) setSessionRaw(s);
+      }
+    } catch { /* ignorar */ }
+  }, []);
+  // setSession persiste la sesión; al cerrar (null) la borra.
+  const setSession = useCallback((s) => {
+    setSessionRaw(s);
+    try {
+      if (s) localStorage.setItem("agro_session_v1", JSON.stringify(s));
+      else localStorage.removeItem("agro_session_v1");
+    } catch { /* ignorar */ }
+  }, []);
   const [page, setPageRaw] = useState("home");
   const [navParam, setNavParam] = useState(null);
   const [aiOpen, setAiOpen] = useState(false);
@@ -1783,12 +1804,32 @@ function AppInner() {
       try {
         const datosNube = await leerTodo();
         if (!activo) return;
-        // Mezclar: por cada tabla que vino de la nube con datos, reemplaza la local.
-        // Las tablas vacías en la nube NO sobrescriben las locales (precaución contra borrar todo accidentalmente).
+        // Merge POR REGISTRO (no por tabla) para resolver conflictos entre dispositivos.
+        // Regla: por cada id, gana el registro más reciente (por timestamp _actualizado).
+        // - Registros solo en la nube: se agregan.
+        // - Registros solo locales (aún sin subir): se conservan.
+        // - Registros en ambos: gana el más reciente; así nadie pisa el trabajo del otro.
         setData(prev => {
           const next = { ...prev };
-          Object.entries(datosNube || {}).forEach(([tabla, filas]) => {
-            if (Array.isArray(filas) && filas.length > 0) next[tabla] = filas;
+          Object.entries(datosNube || {}).forEach(([tabla, filasNube]) => {
+            if (!Array.isArray(filasNube)) return;
+            const localPrev = Array.isArray(prev[tabla]) ? prev[tabla] : [];
+            // Si la nube viene vacía, NO tocar lo local (precaución contra borrar todo).
+            if (filasNube.length === 0) return;
+            const porId = {};
+            // Primero lo local
+            localPrev.forEach(r => { if (r && r.id != null) porId[r.id] = r; });
+            // Luego la nube: gana si es más reciente o si el local no tiene timestamp
+            filasNube.forEach(rn => {
+              if (!rn || rn.id == null) return;
+              const rl = porId[rn.id];
+              if (!rl) { porId[rn.id] = rn; return; }
+              const tn = rn._actualizado || "";
+              const tl = rl._actualizado || "";
+              // Si la nube es más reciente (o el local no tiene marca), la nube gana.
+              porId[rn.id] = (tn >= tl) ? rn : rl;
+            });
+            next[tabla] = Object.values(porId);
           });
           return next;
         });
@@ -1802,6 +1843,26 @@ function AppInner() {
   }, [session?.id, session?.cuenta]);
 
   const setPage = useCallback(p => { setPageRaw(p); setNavParam(null); }, []);
+
+  // Botón "atrás" del navegador/teléfono: retrocede dentro de la app en vez de salir.
+  // Cuando se entra a una página que no es "home", se agrega una entrada al historial;
+  // al presionar atrás, se vuelve a "home" en lugar de cerrar la app.
+  useEffect(() => {
+    if (page !== "home") {
+      window.history.pushState({ agroPage: page }, "");
+    }
+  }, [page]);
+  useEffect(() => {
+    const onPop = () => {
+      // Al presionar atrás: si no estamos en home, volver a home; si ya estamos en home, dejar salir.
+      setPageRaw(prev => {
+        if (prev !== "home") { setNavParam(null); return "home"; }
+        return prev;
+      });
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
 
   useEffect(() => {
     try {
@@ -6413,6 +6474,15 @@ function RegistroActividadAdmin({ data, add, upd, setInv, session, onClose }) {
                 </div>
               );
             })}
+            <div className={`parcela-card${form.parcelaId === "__bodega__" && form.cultivoBodega === "__general__" ? " active" : ""}`}
+                 style={{ borderColor: "rgba(96,165,250,.4)" }}
+                 onClick={() => { setForm(f => ({ ...f, parcelaId: "__bodega__", cultivoBodega: "__general__" })); setPaso(3); }}>
+              <div className="parcela-thumb-ph">🏗️</div>
+              <div className="parcela-body">
+                <div className="pc-name">General de la operación</div>
+                <div className="pc-sub">Reparar, construir, tareas que no son de un cultivo. Se reparte entre todos los cultivos.</div>
+              </div>
+            </div>
             <button className="btn btn-outline mt-2" onClick={() => setPaso(1)}>‹ Atrás</button>
           </>
         )}
@@ -7987,6 +8057,8 @@ function RegistroMasivo({ data, add, upd, setInv, session, onClose }) {
   const [sel, setSel] = useState({});
   // Selección de cuadrillas: { [id]: { incluir, modalidad, tarifa, unidades, personas, flete } }
   const [selCuad, setSelCuad] = useState({});
+  // Selección de externos: { [id]: { incluir, tarifa, unidades } } (destajo, sin flete)
+  const [selExt, setSelExt] = useState({});
   const [enviado, setEnviado] = useState(false);
   const [horasComun, setHorasComun] = useState(8);
 
@@ -8029,7 +8101,17 @@ function RegistroMasivo({ data, add, upd, setInv, session, onClose }) {
     return tarifa * unidades + flete; // destajo
   };
 
-  const totalRegistros = seleccionados.length + cuadrillasSel.length;
+  // --- Externos (destajo: tarifa x unidades, sin flete) ---
+  const toggleExt = e => setSelExt(s => {
+    const cur = s[e.id];
+    if (cur && cur.incluir) return { ...s, [e.id]: { ...cur, incluir: false } };
+    return { ...s, [e.id]: { incluir: true, tarifa: "", unidades: "", ha: "" } };
+  });
+  const setCampoExt = (id, campo, val) => setSelExt(s => ({ ...s, [id]: { ...s[id], [campo]: val } }));
+  const externosSel = (data.externos || []).filter(e => selExt[e.id] && selExt[e.id].incluir);
+  const calcCostoExt = (cfg) => (parseFloat(cfg.tarifa) || 0) * (parseFloat(cfg.unidades) || 0);
+
+  const totalRegistros = seleccionados.length + cuadrillasSel.length + externosSel.length;
 
   // Aplicar las horas comunes a todos los seleccionados
   const aplicarHorasATodos = () => setSel(s => {
@@ -8040,7 +8122,7 @@ function RegistroMasivo({ data, add, upd, setInv, session, onClose }) {
 
   const enviar = () => {
     if (!parcelaId || !tipo) { alert("Falta parcela o actividad"); return; }
-    if (seleccionados.length === 0 && cuadrillasSel.length === 0) { alert("Selecciona al menos un trabajador o cuadrilla"); return; }
+    if (seleccionados.length === 0 && cuadrillasSel.length === 0 && externosSel.length === 0) { alert("Selecciona al menos un trabajador, cuadrilla o externo"); return; }
     const _sb = siembraEnFecha(data, parcelaId, fecha);
     const maq = data.maquinaria.find(m => m.id === maquinariaId);
     let idxGlobal = 0;
@@ -8079,6 +8161,26 @@ function RegistroMasivo({ data, add, upd, setInv, session, onClose }) {
         observaciones: obs, flete: parseFloat(cfg.flete) || 0,
         modalidadPago: cfg.modalidad, cuadrilla_tarifa: parseFloat(cfg.tarifa) || 0,
         cuadrilla_unidades: parseFloat(cfg.unidades) || 0, cuadrilla_personas: parseFloat(cfg.personas) || 0,
+        hectareas_trab: parseFloat(cfg.ha) || 0,
+        registradoEnNombrePor: { rol: session.role, id: session.id, nombre: session.nombre },
+        registroMasivo: true,
+        cosecha: null,
+      });
+      idxGlobal++;
+    });
+    // Externos (destajo: tarifa x unidades, sin flete)
+    externosSel.forEach((e) => {
+      const cfg = selExt[e.id];
+      const costoMO = calcCostoExt(cfg);
+      add("actividades", {
+        id: `a${Date.now()}${idxGlobal}`, fecha, parcelaId, tipo,
+        siembraId: _sb?.id || null,
+        registradoPor: { tipo: "externo", id: e.id },
+        maquinariaId: null, horas_maq: 0, horas_trab: 0,
+        insumos: [], costoMO, costoMaq: 0, costoInsumos: 0, costoTotal: costoMO,
+        observaciones: obs, flete: 0,
+        modalidadPago: "destajo", externo_tarifa: parseFloat(cfg.tarifa) || 0,
+        externo_unidades: parseFloat(cfg.unidades) || 0,
         hectareas_trab: parseFloat(cfg.ha) || 0,
         registradoEnNombrePor: { rol: session.role, id: session.id, nombre: session.nombre },
         registroMasivo: true,
@@ -8246,9 +8348,39 @@ function RegistroMasivo({ data, add, upd, setInv, session, onClose }) {
                 })}
               </div>
             )}
+            {(data.externos || []).length > 0 && (
+              <div style={{ marginTop: 18 }}>
+                <div className="text-sm font-bold mb-2" style={{ paddingLeft: 4 }}>Externos</div>
+                <div className="text-xs text-muted mb-2" style={{ paddingLeft: 4 }}>Prestadores independientes. Cobran por destajo (tarifa × unidades), su pago incluye todo.</div>
+                {(data.externos || []).map(e => {
+                  const cfg = selExt[e.id];
+                  const activo = cfg && cfg.incluir;
+                  return (
+                    <div key={e.id} className={`parcela-card${activo ? " active" : ""}`} style={{ flexDirection: "column", alignItems: "stretch", gap: 8 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }} onClick={() => toggleExt(e)}>
+                        <div className="parcela-thumb-ph">{activo ? "✅" : "🧑‍🌾"}</div>
+                        <div className="parcela-body"><div className="pc-name">{e.nombre}</div><div className="pc-sub">Externo · destajo</div></div>
+                      </div>
+                      {activo && (
+                        <div style={{ paddingLeft: 4 }}>
+                          <div className="inp-row">
+                            <div style={{ flex: 1 }}><label className="form-label" style={{ fontSize: 10 }}>$ por unidad</label><input type="number" className="inp" value={cfg.tarifa} onChange={e2 => setCampoExt(e.id, "tarifa", e2.target.value)} /></div>
+                            <div style={{ flex: 1 }}><label className="form-label" style={{ fontSize: 10 }}>Unidades (surcos, ton...)</label><input type="number" className="inp" value={cfg.unidades} onChange={e2 => setCampoExt(e.id, "unidades", e2.target.value)} /></div>
+                          </div>
+                          <div className="inp-row">
+                            <div style={{ flex: 1 }}><label className="form-label" style={{ fontSize: 10 }}>Hectáreas (opcional)</label><input type="number" className="inp" placeholder="0" value={cfg.ha} onChange={e2 => setCampoExt(e.id, "ha", e2.target.value)} /></div>
+                          </div>
+                          <div className="text-xs text-muted mt-1" style={{ textAlign: "right" }}>Costo: {fmt(calcCostoExt(cfg))}</div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
             <div className="gap-row mt-2">
               <button className="btn btn-outline" style={{ flex: "0 0 auto", width: "auto", padding: "14px 20px" }} onClick={() => setPaso(1)}>‹</button>
-              <button className="btn btn-accent" onClick={() => { if (seleccionados.length === 0 && cuadrillasSel.length === 0) { alert("Selecciona al menos uno"); return; } setPaso(3); }}>Continuar →</button>
+              <button className="btn btn-accent" onClick={() => { if (seleccionados.length === 0 && cuadrillasSel.length === 0 && externosSel.length === 0) { alert("Selecciona al menos uno"); return; } setPaso(3); }}>Continuar →</button>
             </div>
           </>
         )}
@@ -8295,12 +8427,28 @@ function RegistroMasivo({ data, add, upd, setInv, session, onClose }) {
                 })}
               </div>
             )}
+            {externosSel.length > 0 && (
+              <div className="card">
+                <div className="card-title">Externos ({externosSel.length})</div>
+                {externosSel.map(e => {
+                  const cfg = selExt[e.id];
+                  return (
+                    <div key={e.id} className="list-item">
+                      <div className="li-icon">🧑‍🌾</div>
+                      <div className="li-body"><div className="li-title">{e.nombre}</div><div className="li-sub">destajo{cfg.ha ? ` · ${cfg.ha} ha` : ""}</div></div>
+                      <div className="li-right"><div className="li-val">{fmt(calcCostoExt(cfg))}</div></div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
             <div className="card">
               <div className="flex-b">
                 <span className="font-bold">Costo total de mano de obra</span>
                 <span className="font-bold text-accent">{fmt(
                   seleccionados.reduce((s, p) => s + (p.sueldo || 0) * ((parseFloat(sel[p.id].horas) || 8) / 8), 0)
                   + cuadrillasSel.reduce((s, c) => s + calcCostoCuad(selCuad[c.id]), 0)
+                  + externosSel.reduce((s, e) => s + calcCostoExt(selExt[e.id]), 0)
                 )}</span>
               </div>
             </div>

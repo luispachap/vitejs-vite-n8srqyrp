@@ -93,6 +93,7 @@ function objetoAFila(tabla, obj) {
   const fila = {};
   const datos = {};
   for (const [k, v] of Object.entries(obj || {})) {
+    if (k === "_actualizado") continue; // metadato local, no se sube
     if (reales.includes(k)) fila[aSql(k)] = v;
     else datos[k] = v;
   }
@@ -112,6 +113,9 @@ function filaAObjeto(fila) {
     obj[aApp(k)] = v;
   }
   if (datos && typeof datos === "object") Object.assign(obj, datos);
+  // Conservar el timestamp de la nube para poder resolver conflictos entre dispositivos
+  // (merge por registro: gana el más reciente). Se guarda aparte para no chocar con datos.
+  if (actualizado) obj._actualizado = actualizado;
   return obj;
 }
 
