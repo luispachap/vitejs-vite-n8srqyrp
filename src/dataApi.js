@@ -68,6 +68,8 @@ const COLUMNAS_REALES = {
   solicitudes_compra: ["id", "estado"],
   bitacora:       ["id"],
   avances_fase:   ["id"],
+  embarques:      ["id"],
+  terminados:     ["id"],
 };
 
 // Diccionario: nombre en la app (camelCase) → nombre en SQL (snake_case)

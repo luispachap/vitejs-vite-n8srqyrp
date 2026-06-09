@@ -432,6 +432,8 @@ const INITIAL = {
       ] },
   ],
   envios_bodega: [],
+  embarques: [],
+  terminados: [],
   config_contpaqi: [],
 };
 
@@ -999,6 +1001,92 @@ function registrarCosecha(data, add, upd, { parcelaId, cantidad, unidad, registr
   }
 }
 
+/* ════════════ INVENTARIO DE PRODUCTO TERMINADO (por calibre) ════════════ */
+/* Almacén separado de los insumos. Cada registro es un calibre de un cultivo
+   con su existencia (cajas y kg) y su historial de movimientos. Es la base de
+   la trazabilidad: el ajo entra aquí tras la seleccionadora/encajado, y sale
+   con los embarques. */
+
+// Clave única de un lote de terminado: cultivo + calibre (+ variedad opcional)
+function claveTerminado(cultivo, calibre, variedad) {
+  return `${cultivo || "?"}__${calibre || "?"}${variedad ? "__" + variedad : ""}`;
+}
+
+// Busca el registro de terminado de un cultivo/calibre/variedad
+function buscarTerminado(data, cultivo, calibre, variedad) {
+  const clave = claveTerminado(cultivo, calibre, variedad);
+  return (data.terminados || []).find(t => t.clave === clave);
+}
+
+// ENTRADA al inventario de terminados (del encajado tras seleccionadora).
+// Suma cajas y kg al lote del calibre. Crea el lote si no existe.
+function entradaTerminado(data, add, upd, { cultivo, calibre, variedad, cajas, kg, fecha, nota, registradoPor }) {
+  const nCajas = parseFloat(cajas) || 0;
+  const nKg = parseFloat(kg) || 0;
+  if (nCajas <= 0 && nKg <= 0) return;
+  const clave = claveTerminado(cultivo, calibre, variedad);
+  const mov = {
+    id: `mt${Date.now()}${Math.floor(Math.random() * 999)}`,
+    tipo: "entrada", fecha: fecha || today(), cajas: nCajas, kg: nKg,
+    nota: nota || "", registradoPor: registradoPor || null,
+  };
+  const exist = (data.terminados || []).find(t => t.clave === clave);
+  if (exist) {
+    upd("terminados", {
+      ...exist,
+      cajas: (exist.cajas || 0) + nCajas,
+      kg: (exist.kg || 0) + nKg,
+      movimientos: [...(exist.movimientos || []), mov],
+    });
+  } else {
+    add("terminados", {
+      id: `term${Date.now()}`, clave, cultivo, calibre, variedad: variedad || "",
+      cajas: nCajas, kg: nKg, movimientos: [mov],
+    });
+  }
+}
+
+// SALIDA del inventario de terminados (por embarque o ajuste).
+// Resta cajas y kg. No deja existencia negativa.
+function salidaTerminado(data, add, upd, { cultivo, calibre, variedad, cajas, kg, fecha, nota, ref, registradoPor }) {
+  const nCajas = parseFloat(cajas) || 0;
+  const nKg = parseFloat(kg) || 0;
+  const exist = (data.terminados || []).find(t => t.clave === claveTerminado(cultivo, calibre, variedad));
+  if (!exist) return false;
+  const mov = {
+    id: `mt${Date.now()}${Math.floor(Math.random() * 999)}`,
+    tipo: "salida", fecha: fecha || today(), cajas: nCajas, kg: nKg,
+    nota: nota || "", ref: ref || "", registradoPor: registradoPor || null,
+  };
+  upd("terminados", {
+    ...exist,
+    cajas: Math.max(0, (exist.cajas || 0) - nCajas),
+    kg: Math.max(0, (exist.kg || 0) - nKg),
+    movimientos: [...(exist.movimientos || []), mov],
+  });
+  return true;
+}
+
+// Ajuste manual de existencia (merma, conteo físico, corrección)
+function ajustarTerminado(data, upd, { terminadoId, nuevasCajas, nuevosKg, motivo, registradoPor }) {
+  const exist = (data.terminados || []).find(t => t.id === terminadoId);
+  if (!exist) return;
+  const mov = {
+    id: `mt${Date.now()}${Math.floor(Math.random() * 999)}`,
+    tipo: "ajuste", fecha: today(),
+    cajas: (parseFloat(nuevasCajas) || 0) - (exist.cajas || 0),
+    kg: (parseFloat(nuevosKg) || 0) - (exist.kg || 0),
+    nota: motivo || "Ajuste manual", registradoPor: registradoPor || null,
+  };
+  upd("terminados", {
+    ...exist,
+    cajas: parseFloat(nuevasCajas) || 0,
+    kg: parseFloat(nuevosKg) || 0,
+    movimientos: [...(exist.movimientos || []), mov],
+  });
+}
+
+
 // Resumen de un ciclo agrícola: agrupa costos, cosecha y ventas por rango de fechas
 function resumenCiclo(data, ciclo) {
   const ini = ciclo.fechaInicio || "2000-01-01";
@@ -1498,7 +1586,7 @@ const TABLAS_NUBE = [
   "inventario","actividades","cosechas","aplicaciones","ingresos",
   "egresos","compras","entradas_inv","tareas","bonificaciones",
   "incidencias","prestamos","cajachica","creditos","proveedores",
-  "ciclos","asistencia","envios_bodega","solicitudes_compra","bitacora","avances_fase",
+  "ciclos","asistencia","envios_bodega","solicitudes_compra","bitacora","avances_fase","embarques","terminados",
 ];
 
 function useOffline() {
@@ -1705,6 +1793,8 @@ function normalizeData(d) {
   (fix.compras || []).forEach(c => { if (!Array.isArray(c.items)) c.items = []; });
   (fix.aplicaciones || []).forEach(a => { if (!Array.isArray(a.productos)) a.productos = []; });
   if (!Array.isArray(fix.envios_bodega)) fix.envios_bodega = [];
+  if (!Array.isArray(fix.embarques)) fix.embarques = [];
+  if (!Array.isArray(fix.terminados)) fix.terminados = [];
   if (!Array.isArray(fix.externos)) fix.externos = [];
   // Vista contable: solo actividades aprobadas o sin estado (planta/cuadrilla legacy)
   const actsBase = (fix.actividades || []).filter(a => !a.estado || a.estado === "aprobado");
@@ -2110,6 +2200,9 @@ function AppInner() {
               {page === "variedades" && <GestionVariedades data={data} upd={upd} session={session} onClose={() => setPage("home")} />}
               {page === "reporte-variedades" && <ReporteVariedades data={data} onClose={() => setPage("home")} />}
               {page === "contpaqi" && <ExportarContPAQi data={data} upd={upd} add={add} session={session} onClose={() => setPage("home")} />}
+              {page === "embarque" && <EmbarqueAjo data={data} add={add} upd={upd} session={session} onClose={() => setPage("home")} />}
+              {page === "terminados" && <InventarioTerminado data={data} add={add} upd={upd} session={session} onClose={() => setPage("home")} />}
+              {page === "consignaciones" && <Consignaciones data={data} add={add} upd={upd} session={session} onClose={() => setPage("home")} />}
             </>}
             {isEncargado && <>
               {page === "home" && <EncargadoHome data={data} session={session} onNav={setPage} onLogout={cerrarSesion} online={online} />}
@@ -2170,6 +2263,9 @@ function AppInner() {
               {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} setInv={setInv} aplicarLote={aplicarLote} session={session} onClose={() => setPage("home")} />}
               {page === "operacion" && <PanelOperacion data={data} onClose={() => setPage("home")} />}
               {page === "contpaqi" && <ExportarContPAQi data={data} upd={upd} add={add} session={session} onClose={() => setPage("home")} />}
+              {page === "embarque" && <EmbarqueAjo data={data} add={add} upd={upd} session={session} onClose={() => setPage("home")} />}
+              {page === "terminados" && <InventarioTerminado data={data} add={add} upd={upd} session={session} onClose={() => setPage("home")} />}
+              {page === "consignaciones" && <Consignaciones data={data} add={add} upd={upd} session={session} onClose={() => setPage("home")} />}
             </>}
           </ErrorBoundary>
         </div>
@@ -9208,6 +9304,9 @@ function FinanzasHome({ data, session, onNav, onLogout }) {
             <div className="option-card" onClick={() => onNav("operacion")}><span className="oc-icon">🎯</span><span className="oc-label">Operación</span><span className="oc-sub">Qué pasa ahora en campo</span></div>
             <div className="option-card" onClick={() => onNav("solicitudes")}><span className="oc-icon">🛒</span><span className="oc-label">Compras</span><span className="oc-sub">Solicitudes del personal</span></div>
             <div className="option-card" onClick={() => onNav("contpaqi")}><span className="oc-icon">📑</span><span className="oc-label">ContPAQi</span><span className="oc-sub">Exportar pólizas</span></div>
+            <div className="option-card" onClick={() => onNav("embarque")}><span className="oc-icon">🚛</span><span className="oc-label">Salida de camión</span><span className="oc-sub">Embarque y pesada</span></div>
+            <div className="option-card" onClick={() => onNav("terminados")}><span className="oc-icon">🧄</span><span className="oc-label">Ajo terminado</span><span className="oc-sub">Inventario por calibre</span></div>
+            <div className="option-card" onClick={() => onNav("consignaciones")}><span className="oc-icon">📋</span><span className="oc-label">Consignaciones</span><span className="oc-sub">Pendientes de cobro</span></div>
           </div>
         </div>
       </div>
@@ -10586,6 +10685,8 @@ function AdminMasFunciones({ onNav, onClose }) {
         { page: "personal", icon: "👷", label: "Personal", sub: "Gestión de trabajadores" },
         { page: "asistencia", icon: "📋", label: "Asistencia", sub: "Registro de jornadas" },
         { page: "registro-masivo", icon: "📝", label: "Registro masivo", sub: "Varias actividades de una vez" },
+        { page: "embarque", icon: "🚛", label: "Salida de camión", sub: "Embarque de ajo y formato" },
+        { page: "terminados", icon: "🧄", label: "Ajo terminado", sub: "Inventario por calibre" },
       ],
     },
     {
@@ -10595,6 +10696,7 @@ function AdminMasFunciones({ onNav, onClose }) {
         { page: "deudas", icon: "🏦", label: "Deudas", sub: "Créditos y pagos" },
         { page: "proyeccion", icon: "📅", label: "Proyección semanal", sub: "Qué se va a necesitar" },
         { page: "contpaqi", icon: "📑", label: "Exportar a ContPAQi", sub: "Pólizas para tu contabilidad" },
+        { page: "consignaciones", icon: "📋", label: "Consignaciones", sub: "Embarques pendientes de cobro" },
       ],
     },
     {
@@ -10944,6 +11046,563 @@ function ExportarContPAQi({ data, upd, add, session, onClose }) {
         <div className="card" style={{ background: "rgba(96,165,250,.05)", border: "1px solid rgba(96,165,250,.2)" }}>
           <div className="text-xs text-muted">💡 Cada movimiento genera dos líneas (cargo y abono) para que la póliza cuadre. Revisa el Excel y ajústalo a tu catálogo antes de importarlo. La estructura exacta de importación puede variar según tu versión de ContPAQi.</div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/* ════════════ EMBARQUE / SALIDA DE CAMIÓN (pesada de tarimas) ════════════ */
+/* Captura un embarque de ajo: varias tarimas, cada una de un calibre, con su
+   pesada (peso bruto - tara del pallet = peso neto). Genera el formato de salida. */
+function EmbarqueAjo({ data, add, upd, session, onClose }) {
+  const CALIBRES = ["Extra / Jumbo", "Primera", "Segunda", "Tercera", "Cuarta", "Rezaga", "Otro"];
+  const FENV = {
+    fecha: today(), tipo: "cliente", cultivo: (data.cultivos || [])[0]?.nombre || "Ajo",
+    cliente: "", destino: "", transportista: "", placas: "", chofer: "",
+    notas: "", folio: "", descontarInv: true,
+  };
+  const [env, setEnv] = useState(FENV);
+  const [tarimas, setTarimas] = useState([]);
+  // Captura de una tarima en curso
+  const TAR0 = { calibre: "Primera", variedad: "", numCajas: "", pesoBruto: "", tara: "" };
+  const [tar, setTar] = useState(TAR0);
+  const [guardado, setGuardado] = useState(null);
+
+  const cultivos = [...new Set((data.cultivos || []).map(c => c.nombre))].filter(Boolean);
+  // Existencia disponible del calibre que se está capturando
+  const dispTarima = (() => {
+    const t = buscarTerminado(data, env.cultivo, tar.calibre, tar.variedad);
+    return t ? { cajas: t.cajas || 0, kg: t.kg || 0 } : { cajas: 0, kg: 0 };
+  })();
+
+  const netoTarima = (t) => {
+    const bruto = parseFloat(t.pesoBruto) || 0;
+    const tara = parseFloat(t.tara) || 0;
+    return Math.max(0, bruto - tara); // neto = bruto - tara del pallet
+  };
+
+  const agregarTarima = () => {
+    if (!tar.pesoBruto || parseFloat(tar.pesoBruto) <= 0) { alert("Captura el peso bruto de la tarima"); return; }
+    setTarimas(prev => [...prev, { ...tar, id: `t${Date.now()}`, neto: netoTarima(tar) }]);
+    setTar({ ...TAR0, calibre: tar.calibre }); // conserva el calibre por comodidad
+  };
+  const quitarTarima = (id) => setTarimas(prev => prev.filter(t => t.id !== id));
+
+  // Totales del embarque
+  const totalTarimas = tarimas.length;
+  const totalCajas = tarimas.reduce((s, t) => s + (parseFloat(t.numCajas) || 0), 0);
+  const totalBruto = tarimas.reduce((s, t) => s + (parseFloat(t.pesoBruto) || 0), 0);
+  const totalTara = tarimas.reduce((s, t) => s + (parseFloat(t.tara) || 0), 0);
+  const totalNeto = tarimas.reduce((s, t) => s + (t.neto || 0), 0);
+  // Resumen por calibre
+  const porCalibre = {};
+  tarimas.forEach(t => {
+    const k = t.calibre || "Otro";
+    if (!porCalibre[k]) porCalibre[k] = { calibre: k, tarimas: 0, cajas: 0, neto: 0 };
+    porCalibre[k].tarimas++; porCalibre[k].cajas += parseFloat(t.numCajas) || 0; porCalibre[k].neto += t.neto || 0;
+  });
+
+  const guardarEmbarque = () => {
+    if (tarimas.length === 0) { alert("Agrega al menos una tarima"); return; }
+    const folio = env.folio || `EMB-${Date.now().toString().slice(-6)}`;
+    const idEmb = `emb${Date.now()}`;
+    const registro = {
+      id: idEmb, ...env, folio,
+      tarimas, totalTarimas, totalCajas, totalBruto, totalTara, totalNeto,
+      porCalibre: Object.values(porCalibre),
+      registradoPor: { rol: session.role, id: session.id, nombre: session.nombre },
+      creado: new Date().toISOString(),
+      // Estado de cobro: los embarques a cliente arrancan "pendiente" (consignación)
+      estadoCobro: env.tipo === "cliente" ? "pendiente" : "na",
+      liquidaciones: [],
+    };
+    add("embarques", registro);
+    // Capa 2: descontar del inventario de terminados, por calibre
+    if (env.descontarInv) {
+      tarimas.forEach(t => {
+        salidaTerminado(data, add, upd, {
+          cultivo: env.cultivo, calibre: t.calibre, variedad: t.variedad || "",
+          cajas: parseFloat(t.numCajas) || 0, kg: t.neto || 0,
+          fecha: env.fecha, ref: folio,
+          nota: `Embarque ${folio}${env.tipo === "cliente" ? " (cliente)" : " (bodega)"}`,
+          registradoPor: { rol: session.role, id: session.id, nombre: session.nombre },
+        });
+      });
+    }
+    setGuardado(registro);
+  };
+
+  const nuevoEmbarque = () => { setEnv(FENV); setTarimas([]); setTar(TAR0); setGuardado(null); };
+
+  // Pantalla de confirmación con el formato generado
+  if (guardado) {
+    return (
+      <div>
+        <div className="top-bar">
+          <button className="btn-ghost" onClick={onClose}>‹</button>
+          <h2>Embarque guardado ✓</h2>
+        </div>
+        <div className="section-pad">
+          <FormatoSalida emb={guardado} />
+          <div className="gap-row mt-2">
+            <button className="btn btn-outline" onClick={() => window.print()}>🖨️ Imprimir / PDF</button>
+            <button className="btn btn-accent" onClick={nuevoEmbarque}>+ Nuevo embarque</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="top-bar">
+        <button className="btn-ghost" onClick={onClose}>‹</button>
+        <h2>Salida de camión 🚛</h2>
+      </div>
+      <div className="section-pad">
+        {/* Tipo de embarque y cultivo */}
+        <div className="card">
+          <div className="card-title">Tipo de salida</div>
+          <div className="tabs-pill" style={{ marginBottom: 12 }}>
+            <button className={`tab-pill${env.tipo === "cliente" ? " active" : ""}`} onClick={() => setEnv(s => ({ ...s, tipo: "cliente" }))}>🚛 A cliente</button>
+            <button className={`tab-pill${env.tipo === "bodega" ? " active" : ""}`} onClick={() => setEnv(s => ({ ...s, tipo: "bodega" }))}>🏚️ A nuestra bodega</button>
+          </div>
+          <div className="text-xs text-muted mb-2">
+            {env.tipo === "cliente"
+              ? "Salida a cliente. Queda como pendiente de cobro (consignación) hasta que liquides."
+              : "Traslado a tu propia bodega. Solo mueve inventario, no es venta."}
+          </div>
+          <div className="form-group"><label className="form-label">Cultivo</label>
+            <select className="inp" value={env.cultivo} onChange={e => setEnv(s => ({ ...s, cultivo: e.target.value }))}>
+              {cultivos.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, cursor: "pointer" }}>
+            <input type="checkbox" checked={env.descontarInv} onChange={e => setEnv(s => ({ ...s, descontarInv: e.target.checked }))} />
+            Descontar del inventario de ajo terminado
+          </label>
+        </div>
+
+        {/* Paso 1: agregar tarimas (la pesada) */}
+        <div className="card" style={{ background: "rgba(245,166,35,.06)", border: "1px solid rgba(245,166,35,.2)" }}>
+          <div className="card-title">⚖️ Pesar tarima</div>
+          <div className="text-xs text-muted mb-2">Cada tarima lleva un solo calibre. Peso neto = bruto − tara del pallet.</div>
+          <div className="inp-row">
+            <div className="form-group" style={{ flex: 1 }}><label className="form-label">Calibre</label>
+              <select className="inp" value={tar.calibre} onChange={e => setTar(t => ({ ...t, calibre: e.target.value }))}>
+                {CALIBRES.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+            <div className="form-group" style={{ flex: 1 }}><label className="form-label">Variedad (opcional)</label><input className="inp" placeholder="—" value={tar.variedad} onChange={e => setTar(t => ({ ...t, variedad: e.target.value }))} /></div>
+          </div>
+          {env.descontarInv && (
+            <div className="text-xs mb-2" style={{ color: dispTarima.cajas > 0 ? "var(--accent)" : "var(--gold)" }}>
+              📦 Disponible de {tar.calibre}: <b>{fmtN(dispTarima.cajas)} cajas</b>{dispTarima.kg > 0 ? ` · ${fmtN(dispTarima.kg)} kg` : ""}
+            </div>
+          )}
+          <div className="form-group"><label className="form-label">Número de cajas</label><input type="number" className="inp" placeholder="0" value={tar.numCajas} onChange={e => setTar(t => ({ ...t, numCajas: e.target.value }))} /></div>
+          <div className="inp-row">
+            <div className="form-group" style={{ flex: 1 }}><label className="form-label">Peso bruto (kg)</label><input type="number" className="inp" placeholder="0" value={tar.pesoBruto} onChange={e => setTar(t => ({ ...t, pesoBruto: e.target.value }))} /></div>
+            <div className="form-group" style={{ flex: 1 }}><label className="form-label">Tara pallet (kg)</label><input type="number" className="inp" placeholder="0" value={tar.tara} onChange={e => setTar(t => ({ ...t, tara: e.target.value }))} /></div>
+          </div>
+          <div className="flex-b" style={{ marginBottom: 10 }}>
+            <span className="text-sm text-muted">Peso neto de esta tarima</span>
+            <span className="font-bold text-accent" style={{ fontSize: 18 }}>{fmtN(netoTarima(tar))} kg</span>
+          </div>
+          <button className="btn btn-accent" style={{ width: "100%" }} onClick={agregarTarima}>+ Agregar tarima al camión</button>
+        </div>
+
+        {/* Lista de tarimas cargadas */}
+        {tarimas.length > 0 && (
+          <div className="card">
+            <div className="card-title">Tarimas cargadas ({totalTarimas})</div>
+            {tarimas.map((t, i) => (
+              <div key={t.id} className="list-item">
+                <div className="li-icon">🟫</div>
+                <div className="li-body">
+                  <div className="li-title">#{i + 1} · {t.calibre}</div>
+                  <div className="li-sub">{t.numCajas || "?"} cajas · bruto {fmtN(parseFloat(t.pesoBruto) || 0)} − tara {fmtN(parseFloat(t.tara) || 0)}</div>
+                </div>
+                <div className="li-right">
+                  <div className="li-val">{fmtN(t.neto)} kg</div>
+                  <button className="btn-ghost text-xs" style={{ color: "var(--red)" }} onClick={() => quitarTarima(t.id)}>quitar</button>
+                </div>
+              </div>
+            ))}
+            {/* Resumen por calibre */}
+            <div className="divider" />
+            <div className="text-sm font-bold mb-2">Resumen por calibre</div>
+            {Object.values(porCalibre).map(c => (
+              <div key={c.calibre} className="flex-b" style={{ fontSize: 14, marginBottom: 4 }}>
+                <span>{c.calibre} <span className="text-muted">({c.tarimas} tarimas, {fmtN(c.cajas)} cajas)</span></span>
+                <span className="font-bold">{fmtN(c.neto)} kg</span>
+              </div>
+            ))}
+            <div className="divider" />
+            <div className="flex-b"><span className="text-muted text-sm">Total bruto</span><span>{fmtN(totalBruto)} kg</span></div>
+            <div className="flex-b"><span className="text-muted text-sm">Total tara</span><span>− {fmtN(totalTara)} kg</span></div>
+            <div className="flex-b" style={{ marginTop: 6 }}><span className="font-bold">PESO NETO TOTAL</span><span className="font-bold text-accent" style={{ fontSize: 20 }}>{fmtN(totalNeto)} kg</span></div>
+          </div>
+        )}
+
+        {/* Paso 2: datos del envío */}
+        {tarimas.length > 0 && (
+          <div className="card">
+            <div className="card-title">Datos del envío</div>
+            <div className="form-group"><label className="form-label">Folio (opcional, se genera solo)</label><input className="inp" placeholder="EMB-000000" value={env.folio} onChange={e => setEnv(s => ({ ...s, folio: e.target.value }))} /></div>
+            <div className="form-group"><label className="form-label">Fecha</label><input type="date" className="inp" value={env.fecha} onChange={e => setEnv(s => ({ ...s, fecha: e.target.value }))} /></div>
+            <div className="form-group"><label className="form-label">Cliente / comprador</label><input className="inp" placeholder="Nombre del cliente" value={env.cliente} onChange={e => setEnv(s => ({ ...s, cliente: e.target.value }))} /></div>
+            <div className="form-group"><label className="form-label">Destino</label><input className="inp" placeholder="Ciudad / lugar de entrega" value={env.destino} onChange={e => setEnv(s => ({ ...s, destino: e.target.value }))} /></div>
+            <div className="inp-row">
+              <div className="form-group" style={{ flex: 1 }}><label className="form-label">Transportista</label><input className="inp" placeholder="Línea / nombre" value={env.transportista} onChange={e => setEnv(s => ({ ...s, transportista: e.target.value }))} /></div>
+              <div className="form-group" style={{ flex: 1 }}><label className="form-label">Placas</label><input className="inp" placeholder="Placas" value={env.placas} onChange={e => setEnv(s => ({ ...s, placas: e.target.value }))} /></div>
+            </div>
+            <div className="form-group"><label className="form-label">Chofer</label><input className="inp" placeholder="Nombre del chofer" value={env.chofer} onChange={e => setEnv(s => ({ ...s, chofer: e.target.value }))} /></div>
+            <div className="form-group"><label className="form-label">Notas</label><textarea className="inp" rows="2" placeholder="Observaciones del embarque" value={env.notas} onChange={e => setEnv(s => ({ ...s, notas: e.target.value }))} /></div>
+            <button className="btn btn-accent" style={{ width: "100%" }} onClick={guardarEmbarque}>Guardar embarque y generar formato</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* Formato de salida imprimible de un embarque */
+function FormatoSalida({ emb }) {
+  return (
+    <div className="card" style={{ background: "#fff", color: "#1a1a1a" }}>
+      <div style={{ textAlign: "center", borderBottom: "2px solid #1f3a1e", paddingBottom: 12, marginBottom: 14 }}>
+        <div style={{ fontWeight: 800, fontSize: 18, color: "#1f3a1e" }}>AGROSELECTOS P&A</div>
+        <div style={{ fontSize: 13, color: "#666" }}>Formato de salida de mercancía</div>
+        <div style={{ fontSize: 13, fontWeight: 700, marginTop: 4 }}>Folio: {emb.folio}</div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, fontSize: 13, marginBottom: 12 }}>
+        <div><b>Fecha:</b> {emb.fecha}</div>
+        <div><b>Cliente:</b> {emb.cliente || "—"}</div>
+        <div><b>Destino:</b> {emb.destino || "—"}</div>
+        <div><b>Transportista:</b> {emb.transportista || "—"}</div>
+        <div><b>Placas:</b> {emb.placas || "—"}</div>
+        <div><b>Chofer:</b> {emb.chofer || "—"}</div>
+      </div>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+        <thead>
+          <tr style={{ background: "#f0f0e8" }}>
+            <th style={{ textAlign: "left", padding: "6px 8px", border: "1px solid #ddd" }}>#</th>
+            <th style={{ textAlign: "left", padding: "6px 8px", border: "1px solid #ddd" }}>Calibre</th>
+            <th style={{ textAlign: "right", padding: "6px 8px", border: "1px solid #ddd" }}>Cajas</th>
+            <th style={{ textAlign: "right", padding: "6px 8px", border: "1px solid #ddd" }}>Bruto</th>
+            <th style={{ textAlign: "right", padding: "6px 8px", border: "1px solid #ddd" }}>Tara</th>
+            <th style={{ textAlign: "right", padding: "6px 8px", border: "1px solid #ddd" }}>Neto</th>
+          </tr>
+        </thead>
+        <tbody>
+          {emb.tarimas.map((t, i) => (
+            <tr key={t.id}>
+              <td style={{ padding: "5px 8px", border: "1px solid #ddd" }}>{i + 1}</td>
+              <td style={{ padding: "5px 8px", border: "1px solid #ddd" }}>{t.calibre}</td>
+              <td style={{ textAlign: "right", padding: "5px 8px", border: "1px solid #ddd" }}>{fmtN(parseFloat(t.numCajas) || 0)}</td>
+              <td style={{ textAlign: "right", padding: "5px 8px", border: "1px solid #ddd" }}>{fmtN(parseFloat(t.pesoBruto) || 0)}</td>
+              <td style={{ textAlign: "right", padding: "5px 8px", border: "1px solid #ddd" }}>{fmtN(parseFloat(t.tara) || 0)}</td>
+              <td style={{ textAlign: "right", padding: "5px 8px", border: "1px solid #ddd", fontWeight: 700 }}>{fmtN(t.neto)}</td>
+            </tr>
+          ))}
+        </tbody>
+        <tfoot>
+          <tr style={{ background: "#f0f0e8", fontWeight: 700 }}>
+            <td colSpan="2" style={{ padding: "6px 8px", border: "1px solid #ddd" }}>TOTAL</td>
+            <td style={{ textAlign: "right", padding: "6px 8px", border: "1px solid #ddd" }}>{fmtN(emb.totalCajas)}</td>
+            <td style={{ textAlign: "right", padding: "6px 8px", border: "1px solid #ddd" }}>{fmtN(emb.totalBruto)}</td>
+            <td style={{ textAlign: "right", padding: "6px 8px", border: "1px solid #ddd" }}>{fmtN(emb.totalTara)}</td>
+            <td style={{ textAlign: "right", padding: "6px 8px", border: "1px solid #ddd" }}>{fmtN(emb.totalNeto)}</td>
+          </tr>
+        </tfoot>
+      </table>
+      {emb.notas && <div style={{ fontSize: 12.5, marginTop: 12 }}><b>Notas:</b> {emb.notas}</div>}
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 40, fontSize: 12 }}>
+        <div style={{ textAlign: "center", borderTop: "1px solid #999", paddingTop: 6, width: "40%" }}>Entregó</div>
+        <div style={{ textAlign: "center", borderTop: "1px solid #999", paddingTop: 6, width: "40%" }}>Recibió / Chofer</div>
+      </div>
+    </div>
+  );
+}
+
+/* ════════════ PANTALLA: INVENTARIO DE AJO TERMINADO ════════════ */
+function InventarioTerminado({ data, add, upd, session, onClose }) {
+  const CALIBRES = ["Extra / Jumbo", "Primera", "Segunda", "Tercera", "Cuarta", "Rezaga", "Otro"];
+  const cultivos = [...new Set((data.cultivos || []).map(c => c.nombre))].filter(Boolean);
+  const [showEntrada, setShowEntrada] = useState(false);
+  const [showAjuste, setShowAjuste] = useState(null); // id del terminado a ajustar
+  const ENT0 = { cultivo: cultivos[0] || "Ajo", calibre: "Primera", variedad: "", cajas: "", kg: "", fecha: today(), nota: "" };
+  const [ent, setEnt] = useState(ENT0);
+  const [aj, setAj] = useState({ cajas: "", kg: "", motivo: "" });
+
+  const terminados = (data.terminados || []).filter(t => (t.cajas || 0) > 0 || (t.kg || 0) > 0 || (t.movimientos || []).length > 0);
+  // Agrupar por cultivo
+  const porCultivo = {};
+  terminados.forEach(t => { (porCultivo[t.cultivo] = porCultivo[t.cultivo] || []).push(t); });
+
+  const totalCajas = terminados.reduce((s, t) => s + (t.cajas || 0), 0);
+  const totalKg = terminados.reduce((s, t) => s + (t.kg || 0), 0);
+
+  const guardarEntrada = () => {
+    if ((parseFloat(ent.cajas) || 0) <= 0 && (parseFloat(ent.kg) || 0) <= 0) { alert("Captura cajas o kilos"); return; }
+    entradaTerminado(data, add, upd, { ...ent, registradoPor: { rol: session.role, id: session.id, nombre: session.nombre } });
+    setEnt({ ...ENT0, cultivo: ent.cultivo, calibre: ent.calibre });
+    setShowEntrada(false);
+  };
+
+  const guardarAjuste = (t) => {
+    ajustarTerminado(data, upd, {
+      terminadoId: t.id,
+      nuevasCajas: aj.cajas === "" ? t.cajas : aj.cajas,
+      nuevosKg: aj.kg === "" ? t.kg : aj.kg,
+      motivo: aj.motivo, registradoPor: { rol: session.role, id: session.id, nombre: session.nombre },
+    });
+    setShowAjuste(null); setAj({ cajas: "", kg: "", motivo: "" });
+  };
+
+  return (
+    <div>
+      <div className="top-bar">
+        <button className="btn-ghost" onClick={onClose}>‹</button>
+        <h2>Ajo terminado 🧄</h2>
+      </div>
+      <div className="section-pad">
+        <div className="text-xs text-muted mb-3" style={{ paddingLeft: 4 }}>
+          Inventario de producto terminado, separado por calibre. El ajo entra aquí después de la seleccionadora y el encajado, y sale con los embarques.
+        </div>
+
+        {/* Totales */}
+        <div className="card" style={{ background: "rgba(126,200,50,.08)", border: "1px solid rgba(126,200,50,.25)" }}>
+          <div className="flex-b"><span className="font-bold">Total en bodega</span>
+            <span className="font-bold text-accent">{fmtN(totalCajas)} cajas · {fmtN(totalKg)} kg</span>
+          </div>
+        </div>
+
+        <button className="btn btn-accent" style={{ width: "100%", marginBottom: 14 }} onClick={() => setShowEntrada(v => !v)}>
+          {showEntrada ? "✕ Cancelar" : "+ Registrar entrada (encajado)"}
+        </button>
+
+        {showEntrada && (
+          <div className="card">
+            <div className="card-title">Entrada de ajo terminado</div>
+            <div className="text-xs text-muted mb-2">Lo que sale de la seleccionadora ya encajado por calibre.</div>
+            <div className="inp-row">
+              <div className="form-group" style={{ flex: 1 }}><label className="form-label">Cultivo</label>
+                <select className="inp" value={ent.cultivo} onChange={e => setEnt(s => ({ ...s, cultivo: e.target.value }))}>
+                  {cultivos.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+              <div className="form-group" style={{ flex: 1 }}><label className="form-label">Calibre</label>
+                <select className="inp" value={ent.calibre} onChange={e => setEnt(s => ({ ...s, calibre: e.target.value }))}>
+                  {CALIBRES.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+            </div>
+            <div className="form-group"><label className="form-label">Variedad (opcional, para más trazabilidad)</label><input className="inp" placeholder="Ej. Garra de tigre" value={ent.variedad} onChange={e => setEnt(s => ({ ...s, variedad: e.target.value }))} /></div>
+            <div className="inp-row">
+              <div className="form-group" style={{ flex: 1 }}><label className="form-label">Cajas</label><input type="number" className="inp" placeholder="0" value={ent.cajas} onChange={e => setEnt(s => ({ ...s, cajas: e.target.value }))} /></div>
+              <div className="form-group" style={{ flex: 1 }}><label className="form-label">Kilos (opcional)</label><input type="number" className="inp" placeholder="0" value={ent.kg} onChange={e => setEnt(s => ({ ...s, kg: e.target.value }))} /></div>
+            </div>
+            <div className="form-group"><label className="form-label">Fecha</label><input type="date" className="inp" value={ent.fecha} onChange={e => setEnt(s => ({ ...s, fecha: e.target.value }))} /></div>
+            <div className="form-group"><label className="form-label">Nota</label><input className="inp" placeholder="Opcional" value={ent.nota} onChange={e => setEnt(s => ({ ...s, nota: e.target.value }))} /></div>
+            <button className="btn btn-accent" style={{ width: "100%" }} onClick={guardarEntrada}>Guardar entrada</button>
+          </div>
+        )}
+
+        {/* Existencias por cultivo y calibre */}
+        {Object.keys(porCultivo).length === 0 && (
+          <div className="text-muted text-sm" style={{ textAlign: "center", padding: "32px 0" }}>
+            Aún no hay ajo terminado registrado. Registra una entrada cuando salga de la seleccionadora.
+          </div>
+        )}
+        {Object.entries(porCultivo).map(([cul, lotes]) => (
+          <div key={cul} className="card">
+            <div className="card-title">{cul}</div>
+            {lotes.sort((a, b) => (a.calibre || "").localeCompare(b.calibre || "")).map(t => (
+              <div key={t.id}>
+                <div className="list-item">
+                  <div className="li-icon">🧄</div>
+                  <div className="li-body">
+                    <div className="li-title">{t.calibre}{t.variedad ? ` · ${t.variedad}` : ""}</div>
+                    <div className="li-sub">{(t.movimientos || []).length} movimientos</div>
+                  </div>
+                  <div className="li-right">
+                    <div className="li-val">{fmtN(t.cajas || 0)} cajas</div>
+                    {(t.kg || 0) > 0 && <div className="text-xs text-muted">{fmtN(t.kg)} kg</div>}
+                    <button className="btn-ghost text-xs" onClick={() => { setShowAjuste(showAjuste === t.id ? null : t.id); setAj({ cajas: String(t.cajas || ""), kg: String(t.kg || ""), motivo: "" }); }}>ajustar</button>
+                  </div>
+                </div>
+                {showAjuste === t.id && (
+                  <div className="card" style={{ background: "rgba(245,166,35,.06)", margin: "4px 0 10px" }}>
+                    <div className="text-xs text-muted mb-2">Corrige la existencia real (conteo físico, merma).</div>
+                    <div className="inp-row">
+                      <div className="form-group" style={{ flex: 1 }}><label className="form-label">Cajas reales</label><input type="number" className="inp" value={aj.cajas} onChange={e => setAj(s => ({ ...s, cajas: e.target.value }))} /></div>
+                      <div className="form-group" style={{ flex: 1 }}><label className="form-label">Kg reales</label><input type="number" className="inp" value={aj.kg} onChange={e => setAj(s => ({ ...s, kg: e.target.value }))} /></div>
+                    </div>
+                    <div className="form-group"><label className="form-label">Motivo</label><input className="inp" placeholder="Ej. conteo físico, merma" value={aj.motivo} onChange={e => setAj(s => ({ ...s, motivo: e.target.value }))} /></div>
+                    <button className="btn btn-accent btn-sm" onClick={() => guardarAjuste(t)}>Guardar ajuste</button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ════════════ CAPA 3: CONSIGNACIONES / LIQUIDACIÓN ════════════ */
+/* Los embarques a cliente salen como "pendiente". Cuando el cliente paga
+   (después, a un precio que no se sabía al embarcar), se liquida: se registra
+   cuánto pagó y cómo (transferencia o contra una deuda con ese cliente).
+   Eso genera el ingreso real y, si es contra deuda, abona al crédito. */
+
+function liquidarEmbarque(data, add, upd, { embarque, monto, fecha, forma, creditoId, nota, registradoPor }) {
+  const m = parseFloat(monto) || 0;
+  if (m <= 0) return;
+  const liq = {
+    id: `liq${Date.now()}`, fecha: fecha || today(), monto: m, forma,
+    creditoId: creditoId || "", nota: nota || "",
+  };
+  // 1) Registrar la liquidación dentro del embarque y marcarlo cobrado
+  const totalLiquidado = (embarque.liquidaciones || []).reduce((s, l) => s + (l.monto || 0), 0) + m;
+  upd("embarques", {
+    ...embarque,
+    liquidaciones: [...(embarque.liquidaciones || []), liq],
+    estadoCobro: "cobrado",
+    montoCobrado: totalLiquidado,
+  });
+  // 2) Generar el ingreso (venta real, ahora que se conoce el precio)
+  add("ingresos", {
+    id: `ing${Date.now()}`, fecha: liq.fecha,
+    concepto: `Liquidación embarque ${embarque.folio}${embarque.cliente ? " · " + embarque.cliente : ""}`,
+    categoria: "venta_cosecha", cultivo: embarque.cultivo || "",
+    monto: m, cantidad: embarque.totalNeto || 0, unidad: "kg",
+    cliente: embarque.cliente || "", metodo: forma === "deuda" ? "contra deuda" : "transferencia",
+    cosechaCantidad: 0, embarqueId: embarque.id,
+  });
+  // 3) Si fue contra deuda, abonar al crédito
+  if (forma === "deuda" && creditoId) {
+    const cr = (data.creditos || []).find(c => c.id === creditoId);
+    if (cr) {
+      upd("creditos", {
+        ...cr,
+        abonos: [...(cr.abonos || []), {
+          id: `ab${Date.now()}`, fecha: liq.fecha, tipo: "cosecha", monto: m,
+          nota: `Embarque ${embarque.folio}`,
+        }],
+      });
+    }
+  }
+}
+
+function Consignaciones({ data, add, upd, session, onClose }) {
+  const [liquidando, setLiquidando] = useState(null); // embarque en proceso de liquidar
+  const LIQ0 = { monto: "", fecha: today(), forma: "transferencia", creditoId: "", nota: "" };
+  const [liq, setLiq] = useState(LIQ0);
+
+  const embarques = (data.embarques || []).filter(e => e.tipo === "cliente");
+  const pendientes = embarques.filter(e => e.estadoCobro === "pendiente");
+  const cobrados = embarques.filter(e => e.estadoCobro === "cobrado");
+  // Créditos activos (deudas con proveedores/clientes) para abonar
+  const creditosActivos = (data.creditos || []).filter(c => c.estado !== "liquidado");
+
+  const hacerLiquidacion = (emb) => {
+    if ((parseFloat(liq.monto) || 0) <= 0) { alert("Captura el monto que pagó el cliente"); return; }
+    if (liq.forma === "deuda" && !liq.creditoId) { alert("Elige a qué deuda se abona"); return; }
+    liquidarEmbarque(data, add, upd, {
+      embarque: emb, ...liq,
+      registradoPor: { rol: session.role, id: session.id, nombre: session.nombre },
+    });
+    setLiquidando(null); setLiq(LIQ0);
+  };
+
+  return (
+    <div>
+      <div className="top-bar">
+        <button className="btn-ghost" onClick={onClose}>‹</button>
+        <h2>Consignaciones 📋</h2>
+      </div>
+      <div className="section-pad">
+        <div className="text-xs text-muted mb-3" style={{ paddingLeft: 4 }}>
+          Embarques a cliente pendientes de cobro. Cuando el cliente pague, liquida aquí para registrar la venta.
+        </div>
+
+        <div className="card" style={{ background: "rgba(245,166,35,.08)", border: "1px solid rgba(245,166,35,.25)" }}>
+          <div className="flex-b"><span className="font-bold">Pendientes de cobro</span>
+            <span className="font-bold" style={{ color: "var(--gold)" }}>{pendientes.length} embarques</span>
+          </div>
+        </div>
+
+        {pendientes.length === 0 && (
+          <div className="text-muted text-sm" style={{ textAlign: "center", padding: "24px 0" }}>
+            No hay embarques pendientes de cobro.
+          </div>
+        )}
+
+        {pendientes.map(emb => (
+          <div key={emb.id} className="card">
+            <div className="flex-b">
+              <div>
+                <div className="font-bold">{emb.folio}</div>
+                <div className="text-xs text-muted">{emb.fecha} · {emb.cliente || "Sin cliente"} · {emb.destino || "—"}</div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div className="font-bold text-accent">{fmtN(emb.totalNeto)} kg</div>
+                <div className="text-xs text-muted">{fmtN(emb.totalCajas)} cajas</div>
+              </div>
+            </div>
+            {/* Resumen por calibre */}
+            <div className="text-xs text-muted mt-1">
+              {(emb.porCalibre || []).map(c => `${c.calibre}: ${fmtN(c.neto)} kg`).join(" · ")}
+            </div>
+            {liquidando === emb.id ? (
+              <div className="card" style={{ background: "rgba(126,200,50,.06)", margin: "10px 0 0" }}>
+                <div className="text-sm font-bold mb-2">Registrar pago del cliente</div>
+                <div className="form-group"><label className="form-label">Monto que pagó (MXN)</label><input type="number" className="inp" placeholder="0" value={liq.monto} onChange={e => setLiq(s => ({ ...s, monto: e.target.value }))} /></div>
+                <div className="form-group"><label className="form-label">Fecha del pago</label><input type="date" className="inp" value={liq.fecha} onChange={e => setLiq(s => ({ ...s, fecha: e.target.value }))} /></div>
+                <div className="form-group"><label className="form-label">¿Cómo pagó?</label>
+                  <select className="inp" value={liq.forma} onChange={e => setLiq(s => ({ ...s, forma: e.target.value }))}>
+                    <option value="transferencia">Transferencia / dinero</option>
+                    <option value="deuda">A cuenta de una deuda que tenemos con él</option>
+                  </select>
+                </div>
+                {liq.forma === "deuda" && (
+                  <div className="form-group"><label className="form-label">¿A qué deuda se abona?</label>
+                    <select className="inp" value={liq.creditoId} onChange={e => setLiq(s => ({ ...s, creditoId: e.target.value }))}>
+                      <option value="">Elegir deuda…</option>
+                      {creditosActivos.map(cr => {
+                        const { saldo } = saldoCredito(cr);
+                        return <option key={cr.id} value={cr.id}>{cr.concepto} (saldo {fmt(saldo)})</option>;
+                      })}
+                    </select>
+                  </div>
+                )}
+                <div className="form-group"><label className="form-label">Nota</label><input className="inp" placeholder="Opcional" value={liq.nota} onChange={e => setLiq(s => ({ ...s, nota: e.target.value }))} /></div>
+                <div className="gap-row">
+                  <button className="btn btn-outline btn-sm" onClick={() => { setLiquidando(null); setLiq(LIQ0); }}>Cancelar</button>
+                  <button className="btn btn-accent btn-sm" onClick={() => hacerLiquidacion(emb)}>Registrar pago</button>
+                </div>
+              </div>
+            ) : (
+              <button className="btn btn-accent btn-sm mt-2" style={{ width: "100%" }} onClick={() => { setLiquidando(emb.id); setLiq(LIQ0); }}>💰 Liquidar (registrar pago)</button>
+            )}
+          </div>
+        ))}
+
+        {cobrados.length > 0 && (
+          <div className="card">
+            <div className="card-title">Ya cobrados ({cobrados.length})</div>
+            {cobrados.slice().reverse().slice(0, 10).map(emb => (
+              <div key={emb.id} className="list-item">
+                <div className="li-icon">✅</div>
+                <div className="li-body"><div className="li-title">{emb.folio} · {emb.cliente || "—"}</div><div className="li-sub">{fmtN(emb.totalNeto)} kg · cobrado {fmt(emb.montoCobrado || 0)}</div></div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
