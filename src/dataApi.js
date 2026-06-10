@@ -70,6 +70,8 @@ const COLUMNAS_REALES = {
   avances_fase:   ["id"],
   embarques:      ["id"],
   terminados:     ["id"],
+  corridas:       ["id"],
+  estibas:        ["id"],
 };
 
 // Diccionario: nombre en la app (camelCase) → nombre en SQL (snake_case)
@@ -123,10 +125,28 @@ function filaAObjeto(fila) {
 
 // ------------------------------------------------------------
 //  LEER toda una colección
+//
+//  Las tablas de MOVIMIENTOS crecen sin fin (actividades, cosechas,
+//  ingresos...). Para no descargar años de historial en cada arranque
+//  (lento y caro en datos móviles), se traen solo los registros más
+//  recientes, ordenados por su marca de tiempo. Los CATÁLOGOS (cultivos,
+//  parcelas, trabajadores) son chicos y se traen completos.
 // ------------------------------------------------------------
+const TOPE_LECTURA = {
+  actividades: 3000, cosechas: 1500, ingresos: 2500, egresos: 2500,
+  asistencia: 4000, bitacora: 1500, aplicaciones: 2000, bonificaciones: 1500,
+  incidencias: 1500, embarques: 1500, entradas_inv: 2000, envios_bodega: 1500,
+};
+
 export async function leerColeccion(tabla) {
   if (!supabaseListo) throw new Error("Supabase no está configurado");
-  const { data, error } = await supabase.from(tabla).select("*");
+  let consulta = supabase.from(tabla).select("*");
+  const tope = TOPE_LECTURA[tabla];
+  if (tope) {
+    // Solo los más recientes (la tabla tiene columna "actualizado")
+    consulta = consulta.order("actualizado", { ascending: false }).limit(tope);
+  }
+  const { data, error } = await consulta;
   if (error) throw error;
   return (data || []).map(filaAObjeto);
 }

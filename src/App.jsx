@@ -434,6 +434,8 @@ const INITIAL = {
   envios_bodega: [],
   embarques: [],
   terminados: [],
+  corridas: [],
+  estibas: [],
   config_contpaqi: [],
 };
 
@@ -956,6 +958,11 @@ const NOMBRE_MES = k => {
 // Unidades de cosecha disponibles
 const UNIDADES_COSECHA = ["kg", "toneladas", "cajas", "arpillas", "costales", "rejas", "manojos", "bultos", "piezas"];
 
+// Calibres de ajo (numéricos: el número indica el tamaño de la cabeza, del 5 al 12).
+const CALIBRES_AJO = ["5", "6", "7", "8", "9", "10", "11", "12", "Otro"];
+// Muestra el calibre legible: "7" → "Cal. 7", pero deja "Otro" tal cual.
+const labelCalibre = (c) => (c && c !== "Otro" && /^\d+$/.test(String(c))) ? `Cal. ${c}` : (c || "—");
+
 // Cantidad total cosechada de una parcela: suma de registros + ajustes
 function totalCosecha(cos) {
   if (!cos) return 0;
@@ -1084,6 +1091,71 @@ function ajustarTerminado(data, upd, { terminadoId, nuevasCajas, nuevosKg, motiv
     kg: parseFloat(nuevosKg) || 0,
     movimientos: [...(exist.movimientos || []), mov],
   });
+}
+
+/* ════════════ TRAZABILIDAD POR ESTIBAS (genealogía de lotes) ════════════ */
+/* Cada estiba de ajo recibe un código único de trazabilidad y se etiqueta.
+   Al avanzar de fase (barbecho → limpia → selección) nacen estibas nuevas que
+   recuerdan de qué estiba(s) padre vienen. Así cualquier estiba terminada se
+   puede rastrear hasta su(s) parcela(s) de origen, aunque se hayan combinado. */
+
+const FASES_ESTIBA = {
+  barbecho: { letra: "B", nombre: "Barbecho (mochado + 1ª limpia)" },
+  limpia: { letra: "L", nombre: "2ª limpia" },
+  seleccion: { letra: "S", nombre: "Selección / terminado" },
+};
+
+// Genera un código de trazabilidad legible: AS-B-0625-A3F
+// (AS=Agroselectos - fase - mes/año - clave única sin caracteres confusos)
+function generarCodigoEstiba(fase, fecha) {
+  const f = fecha ? new Date(fecha + "T00:00:00") : new Date();
+  const mmaa = String(f.getMonth() + 1).padStart(2, "0") + String(f.getFullYear()).slice(-2);
+  const letra = (FASES_ESTIBA[fase] || {}).letra || "X";
+  // Caracteres sin ambigüedad: sin O, 0, I, 1, L
+  const chars = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+  let clave = "";
+  for (let i = 0; i < 3; i++) clave += chars[Math.floor(Math.random() * chars.length)];
+  return `AS-${letra}-${mmaa}-${clave}`;
+}
+
+// Crea una estiba. padres = array de IDs de estibas de origen (vacío si nace en barbecho).
+function crearEstiba(data, add, { fase, cajas, cultivo, parcelaId, siembraId, padres, nota, registradoPor }) {
+  const codigo = generarCodigoEstiba(fase, today());
+  // Resolver las parcelas de origen: propias + heredadas de los padres (genealogía)
+  let parcelasOrigen = [];
+  if (parcelaId) parcelasOrigen.push(parcelaId);
+  (padres || []).forEach(pid => {
+    const padre = (data.estibas || []).find(e => e.id === pid);
+    if (padre) parcelasOrigen.push(...(padre.parcelasOrigen || []));
+  });
+  parcelasOrigen = [...new Set(parcelasOrigen.filter(Boolean))];
+  const estiba = {
+    id: `est${Date.now()}${Math.floor(Math.random() * 999)}`,
+    codigo, fase, cajas: parseFloat(cajas) || 0,
+    cultivo: cultivo || "", parcelaId: parcelaId || "",
+    siembraId: siembraId || "",
+    padres: padres || [],
+    parcelasOrigen,
+    estado: "activa", // activa | consumida (cuando pasa a la siguiente fase)
+    fecha: today(), nota: nota || "",
+    registradoPor: registradoPor || null,
+    creado: new Date().toISOString(),
+  };
+  add("estibas", estiba);
+  return estiba;
+}
+
+// Rastrea TODAS las parcelas de origen de una estiba siguiendo la genealogía hacia atrás.
+function rastrearOrigen(data, estibaId, visto) {
+  visto = visto || new Set();
+  if (visto.has(estibaId)) return [];
+  visto.add(estibaId);
+  const est = (data.estibas || []).find(e => e.id === estibaId);
+  if (!est) return [];
+  let parcelas = [...(est.parcelasOrigen || [])];
+  if (est.parcelaId) parcelas.push(est.parcelaId);
+  (est.padres || []).forEach(pid => { parcelas.push(...rastrearOrigen(data, pid, visto)); });
+  return [...new Set(parcelas.filter(Boolean))];
 }
 
 
@@ -1586,7 +1658,7 @@ const TABLAS_NUBE = [
   "inventario","actividades","cosechas","aplicaciones","ingresos",
   "egresos","compras","entradas_inv","tareas","bonificaciones",
   "incidencias","prestamos","cajachica","creditos","proveedores",
-  "ciclos","asistencia","envios_bodega","solicitudes_compra","bitacora","avances_fase","embarques","terminados",
+  "ciclos","asistencia","envios_bodega","solicitudes_compra","bitacora","avances_fase","embarques","terminados","corridas","estibas",
 ];
 
 function useOffline() {
@@ -1795,6 +1867,8 @@ function normalizeData(d) {
   if (!Array.isArray(fix.envios_bodega)) fix.envios_bodega = [];
   if (!Array.isArray(fix.embarques)) fix.embarques = [];
   if (!Array.isArray(fix.terminados)) fix.terminados = [];
+  if (!Array.isArray(fix.corridas)) fix.corridas = [];
+  if (!Array.isArray(fix.estibas)) fix.estibas = [];
   if (!Array.isArray(fix.externos)) fix.externos = [];
   // Vista contable: solo actividades aprobadas o sin estado (planta/cuadrilla legacy)
   const actsBase = (fix.actividades || []).filter(a => !a.estado || a.estado === "aprobado");
@@ -1829,13 +1903,29 @@ function AppInner() {
   // así que lo memorizamos: solo se recalcula cuando rawData cambia, no en cada render.
   const data = useMemo(() => normalizeData(rawData), [rawData]);
   const [session, setSessionRaw] = useState(null);
-  // Restaurar sesión guardada (PIN o cuenta) al abrir la app, para no re-loguear cada vez.
+  // Restaurar sesión guardada al abrir la app. SEGURIDAD: los roles que ven
+  // dinero (admin, finanzas, dueño) solo se restauran si Supabase confirma una
+  // cuenta REAL activa — así nadie puede falsificar su rol editando el
+  // localStorage. Los demás (trabajadores, cuadrillas) sí persisten directo,
+  // porque no acceden a información sensible y se busca su comodidad en campo.
   useEffect(() => {
+    const ROLES_SENSIBLES = ["admin", "finanzas", "dueno"];
     try {
       const guardada = localStorage.getItem("agro_session_v1");
-      if (guardada) {
-        const s = JSON.parse(guardada);
-        if (s && s.role) setSessionRaw(s);
+      if (!guardada) return;
+      const s = JSON.parse(guardada);
+      if (!s || !s.role) return;
+      if (ROLES_SENSIBLES.includes(s.role)) {
+        // Validar contra la cuenta real de Supabase antes de restaurar
+        supabase.auth.getSession().then(({ data }) => {
+          if (data && data.session && s.cuenta) {
+            setSessionRaw(s); // cuenta real válida → ok
+          } else {
+            localStorage.removeItem("agro_session_v1"); // forzar login por seguridad
+          }
+        }).catch(() => localStorage.removeItem("agro_session_v1"));
+      } else {
+        setSessionRaw(s); // roles de campo: persistencia directa
       }
     } catch { /* ignorar */ }
   }, []);
@@ -2203,6 +2293,8 @@ function AppInner() {
               {page === "embarque" && <EmbarqueAjo data={data} add={add} upd={upd} session={session} onClose={() => setPage("home")} />}
               {page === "terminados" && <InventarioTerminado data={data} add={add} upd={upd} session={session} onClose={() => setPage("home")} />}
               {page === "consignaciones" && <Consignaciones data={data} add={add} upd={upd} session={session} onClose={() => setPage("home")} />}
+              {page === "corrida" && <CorridaAjo data={data} add={add} upd={upd} session={session} onClose={() => setPage("home")} />}
+              {page === "estibas" && <Estibas data={data} add={add} upd={upd} session={session} onClose={() => setPage("home")} />}
             </>}
             {isEncargado && <>
               {page === "home" && <EncargadoHome data={data} session={session} onNav={setPage} onLogout={cerrarSesion} online={online} />}
@@ -2216,6 +2308,8 @@ function AppInner() {
               {page === "aprobacion-externos" && <AprobacionExternos data={data} upd={upd} onBack={() => setPage("home")} />}
               {page === "solicitudes" && <SolicitudesCompra data={data} add={add} upd={upd} del={del} setInv={setInv} aplicarLote={aplicarLote} session={session} onClose={() => setPage("home")} />}
               {page === "operacion" && <PanelOperacion data={data} onClose={() => setPage("home")} />}
+              {page === "estibas" && <Estibas data={data} add={add} upd={upd} session={session} onClose={() => setPage("home")} />}
+              {page === "corrida" && <CorridaAjo data={data} add={add} upd={upd} session={session} onClose={() => setPage("home")} />}
             </>}
             {isTrab && <>
               {page === "home" && <TrabReg data={data} add={add} upd={upd} setInv={setInv} session={session} online={online} onLogout={cerrarSesion} />}
@@ -2266,6 +2360,8 @@ function AppInner() {
               {page === "embarque" && <EmbarqueAjo data={data} add={add} upd={upd} session={session} onClose={() => setPage("home")} />}
               {page === "terminados" && <InventarioTerminado data={data} add={add} upd={upd} session={session} onClose={() => setPage("home")} />}
               {page === "consignaciones" && <Consignaciones data={data} add={add} upd={upd} session={session} onClose={() => setPage("home")} />}
+              {page === "corrida" && <CorridaAjo data={data} add={add} upd={upd} session={session} onClose={() => setPage("home")} />}
+              {page === "estibas" && <Estibas data={data} add={add} upd={upd} session={session} onClose={() => setPage("home")} />}
             </>}
           </ErrorBoundary>
         </div>
@@ -5603,6 +5699,8 @@ function EncargadoHome({ data, session, onNav, onLogout, online }) {
             <div className="option-card" onClick={() => onNav("asistencia")}><span className="oc-icon">📅</span><span className="oc-label">Asistencia</span><span className="oc-sub">Pase de lista</span></div>
             <div className="option-card" onClick={() => onNav("caja")}><span className="oc-icon">💵</span><span className="oc-label">Caja chica</span><span className="oc-sub">Gastos y movimientos</span></div>
             <div className="option-card" onClick={() => onNav("solicitudes")}><span className="oc-icon">🛒</span><span className="oc-label">Compras</span><span className="oc-sub">Solicitar y gestionar</span></div>
+            <div className="option-card" onClick={() => onNav("estibas")}><span className="oc-icon">🏷️</span><span className="oc-label">Estibas</span><span className="oc-sub">Etiquetas y trazabilidad</span></div>
+            <div className="option-card" onClick={() => onNav("corrida")}><span className="oc-icon">🏭</span><span className="oc-label">Corrida</span><span className="oc-sub">Encajado por calibre</span></div>
             <div className="option-card" onClick={() => onNav("operacion")}><span className="oc-icon">🎯</span><span className="oc-label">Operación</span><span className="oc-sub">Qué pasa ahora en campo</span></div>
           </div>
         </div>
@@ -9307,6 +9405,8 @@ function FinanzasHome({ data, session, onNav, onLogout }) {
             <div className="option-card" onClick={() => onNav("embarque")}><span className="oc-icon">🚛</span><span className="oc-label">Salida de camión</span><span className="oc-sub">Embarque y pesada</span></div>
             <div className="option-card" onClick={() => onNav("terminados")}><span className="oc-icon">🧄</span><span className="oc-label">Ajo terminado</span><span className="oc-sub">Inventario por calibre</span></div>
             <div className="option-card" onClick={() => onNav("consignaciones")}><span className="oc-icon">📋</span><span className="oc-label">Consignaciones</span><span className="oc-sub">Pendientes de cobro</span></div>
+            <div className="option-card" onClick={() => onNav("corrida")}><span className="oc-icon">🏭</span><span className="oc-label">Corrida de ajo</span><span className="oc-sub">Encajado y remisión</span></div>
+            <div className="option-card" onClick={() => onNav("estibas")}><span className="oc-icon">🏷️</span><span className="oc-label">Trazabilidad</span><span className="oc-sub">Estibas y códigos</span></div>
           </div>
         </div>
       </div>
@@ -10687,6 +10787,8 @@ function AdminMasFunciones({ onNav, onClose }) {
         { page: "registro-masivo", icon: "📝", label: "Registro masivo", sub: "Varias actividades de una vez" },
         { page: "embarque", icon: "🚛", label: "Salida de camión", sub: "Embarque de ajo y formato" },
         { page: "terminados", icon: "🧄", label: "Ajo terminado", sub: "Inventario por calibre" },
+        { page: "corrida", icon: "🏭", label: "Corrida de ajo", sub: "Encajado por calibre + remisión" },
+        { page: "estibas", icon: "🏷️", label: "Estibas y trazabilidad", sub: "Códigos de lote por fase" },
       ],
     },
     {
@@ -11055,7 +11157,7 @@ function ExportarContPAQi({ data, upd, add, session, onClose }) {
 /* Captura un embarque de ajo: varias tarimas, cada una de un calibre, con su
    pesada (peso bruto - tara del pallet = peso neto). Genera el formato de salida. */
 function EmbarqueAjo({ data, add, upd, session, onClose }) {
-  const CALIBRES = ["Extra / Jumbo", "Primera", "Segunda", "Tercera", "Cuarta", "Rezaga", "Otro"];
+  const CALIBRES = CALIBRES_AJO;
   const FENV = {
     fecha: today(), tipo: "cliente", cultivo: (data.cultivos || [])[0]?.nombre || "Ajo",
     cliente: "", destino: "", transportista: "", placas: "", chofer: "",
@@ -11064,7 +11166,7 @@ function EmbarqueAjo({ data, add, upd, session, onClose }) {
   const [env, setEnv] = useState(FENV);
   const [tarimas, setTarimas] = useState([]);
   // Captura de una tarima en curso
-  const TAR0 = { calibre: "Primera", variedad: "", numCajas: "", pesoBruto: "", tara: "" };
+  const TAR0 = { calibre: "7", variedad: "", numCajas: "", pesoBruto: "", tara: "" };
   const [tar, setTar] = useState(TAR0);
   const [guardado, setGuardado] = useState(null);
 
@@ -11190,14 +11292,14 @@ function EmbarqueAjo({ data, add, upd, session, onClose }) {
           <div className="inp-row">
             <div className="form-group" style={{ flex: 1 }}><label className="form-label">Calibre</label>
               <select className="inp" value={tar.calibre} onChange={e => setTar(t => ({ ...t, calibre: e.target.value }))}>
-                {CALIBRES.map(c => <option key={c} value={c}>{c}</option>)}
+                {CALIBRES.map(c => <option key={c} value={c}>{labelCalibre(c)}</option>)}
               </select>
             </div>
             <div className="form-group" style={{ flex: 1 }}><label className="form-label">Variedad (opcional)</label><input className="inp" placeholder="—" value={tar.variedad} onChange={e => setTar(t => ({ ...t, variedad: e.target.value }))} /></div>
           </div>
           {env.descontarInv && (
             <div className="text-xs mb-2" style={{ color: dispTarima.cajas > 0 ? "var(--accent)" : "var(--gold)" }}>
-              📦 Disponible de {tar.calibre}: <b>{fmtN(dispTarima.cajas)} cajas</b>{dispTarima.kg > 0 ? ` · ${fmtN(dispTarima.kg)} kg` : ""}
+              📦 Disponible de {labelCalibre(tar.calibre)}: <b>{fmtN(dispTarima.cajas)} cajas</b>{dispTarima.kg > 0 ? ` · ${fmtN(dispTarima.kg)} kg` : ""}
             </div>
           )}
           <div className="form-group"><label className="form-label">Número de cajas</label><input type="number" className="inp" placeholder="0" value={tar.numCajas} onChange={e => setTar(t => ({ ...t, numCajas: e.target.value }))} /></div>
@@ -11220,7 +11322,7 @@ function EmbarqueAjo({ data, add, upd, session, onClose }) {
               <div key={t.id} className="list-item">
                 <div className="li-icon">🟫</div>
                 <div className="li-body">
-                  <div className="li-title">#{i + 1} · {t.calibre}</div>
+                  <div className="li-title">#{i + 1} · {labelCalibre(t.calibre)}</div>
                   <div className="li-sub">{t.numCajas || "?"} cajas · bruto {fmtN(parseFloat(t.pesoBruto) || 0)} − tara {fmtN(parseFloat(t.tara) || 0)}</div>
                 </div>
                 <div className="li-right">
@@ -11234,7 +11336,7 @@ function EmbarqueAjo({ data, add, upd, session, onClose }) {
             <div className="text-sm font-bold mb-2">Resumen por calibre</div>
             {Object.values(porCalibre).map(c => (
               <div key={c.calibre} className="flex-b" style={{ fontSize: 14, marginBottom: 4 }}>
-                <span>{c.calibre} <span className="text-muted">({c.tarimas} tarimas, {fmtN(c.cajas)} cajas)</span></span>
+                <span>{labelCalibre(c.calibre)} <span className="text-muted">({c.tarimas} tarimas, {fmtN(c.cajas)} cajas)</span></span>
                 <span className="font-bold">{fmtN(c.neto)} kg</span>
               </div>
             ))}
@@ -11299,7 +11401,7 @@ function FormatoSalida({ emb }) {
           {emb.tarimas.map((t, i) => (
             <tr key={t.id}>
               <td style={{ padding: "5px 8px", border: "1px solid #ddd" }}>{i + 1}</td>
-              <td style={{ padding: "5px 8px", border: "1px solid #ddd" }}>{t.calibre}</td>
+              <td style={{ padding: "5px 8px", border: "1px solid #ddd" }}>{labelCalibre(t.calibre)}</td>
               <td style={{ textAlign: "right", padding: "5px 8px", border: "1px solid #ddd" }}>{fmtN(parseFloat(t.numCajas) || 0)}</td>
               <td style={{ textAlign: "right", padding: "5px 8px", border: "1px solid #ddd" }}>{fmtN(parseFloat(t.pesoBruto) || 0)}</td>
               <td style={{ textAlign: "right", padding: "5px 8px", border: "1px solid #ddd" }}>{fmtN(parseFloat(t.tara) || 0)}</td>
@@ -11328,11 +11430,11 @@ function FormatoSalida({ emb }) {
 
 /* ════════════ PANTALLA: INVENTARIO DE AJO TERMINADO ════════════ */
 function InventarioTerminado({ data, add, upd, session, onClose }) {
-  const CALIBRES = ["Extra / Jumbo", "Primera", "Segunda", "Tercera", "Cuarta", "Rezaga", "Otro"];
+  const CALIBRES = CALIBRES_AJO;
   const cultivos = [...new Set((data.cultivos || []).map(c => c.nombre))].filter(Boolean);
   const [showEntrada, setShowEntrada] = useState(false);
   const [showAjuste, setShowAjuste] = useState(null); // id del terminado a ajustar
-  const ENT0 = { cultivo: cultivos[0] || "Ajo", calibre: "Primera", variedad: "", cajas: "", kg: "", fecha: today(), nota: "" };
+  const ENT0 = { cultivo: cultivos[0] || "Ajo", calibre: "7", variedad: "", cajas: "", kg: "", fecha: today(), nota: "" };
   const [ent, setEnt] = useState(ENT0);
   const [aj, setAj] = useState({ cajas: "", kg: "", motivo: "" });
 
@@ -11395,7 +11497,7 @@ function InventarioTerminado({ data, add, upd, session, onClose }) {
               </div>
               <div className="form-group" style={{ flex: 1 }}><label className="form-label">Calibre</label>
                 <select className="inp" value={ent.calibre} onChange={e => setEnt(s => ({ ...s, calibre: e.target.value }))}>
-                  {CALIBRES.map(c => <option key={c} value={c}>{c}</option>)}
+                  {CALIBRES.map(c => <option key={c} value={c}>{labelCalibre(c)}</option>)}
                 </select>
               </div>
             </div>
@@ -11424,7 +11526,7 @@ function InventarioTerminado({ data, add, upd, session, onClose }) {
                 <div className="list-item">
                   <div className="li-icon">🧄</div>
                   <div className="li-body">
-                    <div className="li-title">{t.calibre}{t.variedad ? ` · ${t.variedad}` : ""}</div>
+                    <div className="li-title">{labelCalibre(t.calibre)}{t.variedad ? ` · ${t.variedad}` : ""}</div>
                     <div className="li-sub">{(t.movimientos || []).length} movimientos</div>
                   </div>
                   <div className="li-right">
@@ -11556,7 +11658,7 @@ function Consignaciones({ data, add, upd, session, onClose }) {
             </div>
             {/* Resumen por calibre */}
             <div className="text-xs text-muted mt-1">
-              {(emb.porCalibre || []).map(c => `${c.calibre}: ${fmtN(c.neto)} kg`).join(" · ")}
+              {(emb.porCalibre || []).map(c => `${labelCalibre(c.calibre)}: ${fmtN(c.neto)} kg`).join(" · ")}
             </div>
             {liquidando === emb.id ? (
               <div className="card" style={{ background: "rgba(126,200,50,.06)", margin: "10px 0 0" }}>
@@ -11603,6 +11705,451 @@ function Consignaciones({ data, add, upd, session, onClose }) {
             ))}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/* ════════════ CORRIDA DE AJO (encajado por calibre + remisión) ════════════ */
+/* El paso que cierra la trazabilidad: cuando el ajo sale de la seleccionadora se
+   encaja por calibre y se pesa. Cada corrida se liga a su siembra/parcela de
+   origen (de dónde salió ese ajo), suma al inventario de terminados, y genera
+   la remisión imprimible. */
+function CorridaAjo({ data, add, upd, session, onClose }) {
+  const cultivos = [...new Set((data.cultivos || []).map(c => c.nombre))].filter(Boolean);
+  const FCOR = {
+    fecha: today(), cultivo: cultivos[0] || "Ajo", siembraId: "", parcelaId: "",
+    estibaId: "", folio: "", responsable: "", notas: "",
+  };
+  const [cor, setCor] = useState(FCOR);
+  const [lineas, setLineas] = useState([]); // {calibre, variedad, numCajas, pesoBruto, tara, neto}
+  const LIN0 = { calibre: "7", variedad: "", numCajas: "", pesoBruto: "", tara: "" };
+  const [lin, setLin] = useState(LIN0);
+  const [guardado, setGuardado] = useState(null);
+
+  // Siembras activas para ligar el origen (trazabilidad)
+  const siembras = (data.siembras || []).filter(s => s.estado !== "cancelada");
+  const siembrasCultivo = siembras.filter(s => s.cultivoNombre === cor.cultivo);
+  // Estibas de selección activas: la corrida puede nacer de una de ellas (trazabilidad por lote)
+  const estibasSeleccion = (data.estibas || []).filter(e => e.fase === "seleccion" && e.estado === "activa" && e.cultivo === cor.cultivo);
+  const nombreParcela = (pid) => (data.parcelas || []).find(p => p.id === pid)?.nombre || pid;
+
+  const netoLinea = (l) => Math.max(0, (parseFloat(l.pesoBruto) || 0) - (parseFloat(l.tara) || 0));
+
+  const agregarLinea = () => {
+    if (!lin.numCajas || parseFloat(lin.numCajas) <= 0) { alert("Captura el número de cajas"); return; }
+    setLineas(prev => [...prev, { ...lin, id: `l${Date.now()}`, neto: netoLinea(lin) }]);
+    setLin({ ...LIN0, calibre: lin.calibre, variedad: lin.variedad });
+  };
+  const quitarLinea = (id) => setLineas(prev => prev.filter(l => l.id !== id));
+
+  const totalCajas = lineas.reduce((s, l) => s + (parseFloat(l.numCajas) || 0), 0);
+  const totalBruto = lineas.reduce((s, l) => s + (parseFloat(l.pesoBruto) || 0), 0);
+  const totalTara = lineas.reduce((s, l) => s + (parseFloat(l.tara) || 0), 0);
+  const totalNeto = lineas.reduce((s, l) => s + (l.neto || 0), 0);
+
+  const guardarCorrida = () => {
+    if (lineas.length === 0) { alert("Agrega al menos un calibre"); return; }
+    const folio = cor.folio || `COR-${Date.now().toString().slice(-6)}`;
+    const sb = (data.siembras || []).find(s => s.id === cor.siembraId);
+    // Si la corrida nace de una estiba de selección, hereda su origen rastreado
+    const estiba = cor.estibaId ? (data.estibas || []).find(e => e.id === cor.estibaId) : null;
+    let parcelasOrigen = [];
+    if (estiba) parcelasOrigen = rastrearOrigen(data, estiba.id);
+    else if (sb && sb.parcelaId) parcelasOrigen = [sb.parcelaId];
+    const origenTexto = estiba
+      ? `${estiba.codigo}${parcelasOrigen.length ? " · " + parcelasOrigen.map(nombreParcela).join(", ") : ""}`
+      : (sb ? `${sb.cultivoNombre}${sb.variedadNombre ? " · " + sb.variedadNombre : ""}` : "");
+    const registro = {
+      id: `cor${Date.now()}`, ...cor, folio,
+      siembraNombre: origenTexto,
+      estibaCodigo: estiba ? estiba.codigo : "",
+      parcelasOrigen,
+      parcelaId: sb ? sb.parcelaId : cor.parcelaId,
+      lineas, totalCajas, totalBruto, totalTara, totalNeto,
+      registradoPor: { rol: session.role, id: session.id, nombre: session.nombre },
+      creado: new Date().toISOString(),
+    };
+    add("corridas", registro);
+    // Alimentar el inventario de terminados: una entrada por cada calibre, con su origen
+    const origenNota = origenTexto ? ` · ${origenTexto}` : "";
+    lineas.forEach(l => {
+      entradaTerminado(data, add, upd, {
+        cultivo: cor.cultivo, calibre: l.calibre, variedad: l.variedad || "",
+        cajas: parseFloat(l.numCajas) || 0, kg: l.neto || 0,
+        fecha: cor.fecha, nota: `Corrida ${folio}${origenNota}`,
+        registradoPor: { rol: session.role, id: session.id, nombre: session.nombre },
+      });
+    });
+    // Si vino de una estiba, marcarla como consumida (ya pasó a corrida/terminado)
+    if (estiba) upd("estibas", { ...estiba, estado: "consumida" });
+    setGuardado(registro);
+  };
+
+  const nuevaCorrida = () => { setCor(FCOR); setLineas([]); setLin(LIN0); setGuardado(null); };
+
+  if (guardado) {
+    return (
+      <div>
+        <div className="top-bar">
+          <button className="btn-ghost" onClick={onClose}>‹</button>
+          <h2>Corrida guardada ✓</h2>
+        </div>
+        <div className="section-pad">
+          <div className="card" style={{ background: "rgba(126,200,50,.08)", border: "1px solid rgba(126,200,50,.25)" }}>
+            <div className="text-sm" style={{ color: "var(--safe)", fontWeight: 700 }}>✓ Inventario actualizado</div>
+            <div className="text-sm text-muted mt-1">Se sumaron {fmtN(guardado.totalCajas)} cajas al inventario de ajo terminado.</div>
+          </div>
+          <RemisionCorrida cor={guardado} />
+          <div className="gap-row mt-2">
+            <button className="btn btn-outline" onClick={() => window.print()}>🖨️ Imprimir remisión</button>
+            <button className="btn btn-accent" onClick={nuevaCorrida}>+ Nueva corrida</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="top-bar">
+        <button className="btn-ghost" onClick={onClose}>‹</button>
+        <h2>Corrida de ajo 🧄</h2>
+      </div>
+      <div className="section-pad">
+        <div className="text-xs text-muted mb-3" style={{ paddingLeft: 4 }}>
+          Registra el encajado por calibre tras la seleccionadora. Liga la corrida a su parcela de origen para la trazabilidad, suma al inventario y genera la remisión.
+        </div>
+
+        {/* Datos de la corrida + origen (trazabilidad) */}
+        <div className="card">
+          <div className="card-title">Datos de la corrida</div>
+          <div className="inp-row">
+            <div className="form-group" style={{ flex: 1 }}><label className="form-label">Fecha</label><input type="date" className="inp" value={cor.fecha} onChange={e => setCor(s => ({ ...s, fecha: e.target.value }))} /></div>
+            <div className="form-group" style={{ flex: 1 }}><label className="form-label">Cultivo</label>
+              <select className="inp" value={cor.cultivo} onChange={e => setCor(s => ({ ...s, cultivo: e.target.value, siembraId: "" }))}>
+                {cultivos.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+          </div>
+          {/* Origen: preferir estiba de selección (lote rastreable); si no, siembra/parcela */}
+          {estibasSeleccion.length > 0 && (
+            <div className="form-group">
+              <label className="form-label">🏷️ Estiba de selección de origen (recomendado)</label>
+              <select className="inp" value={cor.estibaId} onChange={e => setCor(s => ({ ...s, estibaId: e.target.value, siembraId: "" }))}>
+                <option value="">No usar estiba (elegir parcela abajo)</option>
+                {estibasSeleccion.map(e => {
+                  const parcelas = rastrearOrigen(data, e.id).map(nombreParcela);
+                  return <option key={e.id} value={e.id}>{e.codigo} · {fmtN(e.cajas)} cajas{parcelas.length ? ` (${parcelas.join(", ")})` : ""}</option>;
+                })}
+              </select>
+              <div className="text-xs text-muted mt-1">Si la corrida sale de una estiba etiquetada, hereda su trazabilidad hasta la parcela.</div>
+            </div>
+          )}
+          {/* Origen alterno por siembra (si no se usó estiba) */}
+          {!cor.estibaId && (
+            <div className="form-group">
+              <label className="form-label">🔗 Origen del ajo (parcela / siembra)</label>
+              <select className="inp" value={cor.siembraId} onChange={e => setCor(s => ({ ...s, siembraId: e.target.value }))}>
+                <option value="">Sin especificar</option>
+                {siembrasCultivo.map(s => {
+                  const p = (data.parcelas || []).find(x => x.id === s.parcelaId);
+                  return <option key={s.id} value={s.id}>{p?.nombre || "Parcela"}{s.variedadNombre ? ` · ${s.variedadNombre}` : ""} (desde {s.fechaSiembra})</option>;
+                })}
+              </select>
+              <div className="text-xs text-muted mt-1">Saber de qué parcela salió cada corrida es la trazabilidad completa.</div>
+            </div>
+          )}
+          <div className="inp-row">
+            <div className="form-group" style={{ flex: 1 }}><label className="form-label">Folio (opcional)</label><input className="inp" placeholder="COR-000000" value={cor.folio} onChange={e => setCor(s => ({ ...s, folio: e.target.value }))} /></div>
+            <div className="form-group" style={{ flex: 1 }}><label className="form-label">Responsable</label><input className="inp" placeholder="Quién corrió" value={cor.responsable} onChange={e => setCor(s => ({ ...s, responsable: e.target.value }))} /></div>
+          </div>
+        </div>
+
+        {/* Captura de calibres (pesada) */}
+        <div className="card" style={{ background: "rgba(245,166,35,.06)", border: "1px solid rgba(245,166,35,.2)" }}>
+          <div className="card-title">⚖️ Agregar calibre</div>
+          <div className="inp-row">
+            <div className="form-group" style={{ flex: 1 }}><label className="form-label">Calibre</label>
+              <select className="inp" value={lin.calibre} onChange={e => setLin(l => ({ ...l, calibre: e.target.value }))}>
+                {CALIBRES_AJO.map(c => <option key={c} value={c}>{labelCalibre(c)}</option>)}
+              </select>
+            </div>
+            <div className="form-group" style={{ flex: 1 }}><label className="form-label">Variedad (opcional)</label><input className="inp" placeholder="—" value={lin.variedad} onChange={e => setLin(l => ({ ...l, variedad: e.target.value }))} /></div>
+          </div>
+          <div className="form-group"><label className="form-label">Número de cajas</label><input type="number" className="inp" placeholder="0" value={lin.numCajas} onChange={e => setLin(l => ({ ...l, numCajas: e.target.value }))} /></div>
+          <div className="inp-row">
+            <div className="form-group" style={{ flex: 1 }}><label className="form-label">Peso bruto (kg)</label><input type="number" className="inp" placeholder="0" value={lin.pesoBruto} onChange={e => setLin(l => ({ ...l, pesoBruto: e.target.value }))} /></div>
+            <div className="form-group" style={{ flex: 1 }}><label className="form-label">Tara (kg)</label><input type="number" className="inp" placeholder="0" value={lin.tara} onChange={e => setLin(l => ({ ...l, tara: e.target.value }))} /></div>
+          </div>
+          <div className="flex-b" style={{ marginBottom: 10 }}>
+            <span className="text-sm text-muted">Neto de este calibre</span>
+            <span className="font-bold text-accent" style={{ fontSize: 18 }}>{fmtN(netoLinea(lin))} kg</span>
+          </div>
+          <button className="btn btn-accent" style={{ width: "100%" }} onClick={agregarLinea}>+ Agregar calibre</button>
+        </div>
+
+        {/* Líneas capturadas */}
+        {lineas.length > 0 && (
+          <div className="card">
+            <div className="card-title">Calibres de esta corrida</div>
+            {lineas.map(l => (
+              <div key={l.id} className="list-item">
+                <div className="li-icon">🧄</div>
+                <div className="li-body">
+                  <div className="li-title">{labelCalibre(l.calibre)}{l.variedad ? ` · ${l.variedad}` : ""}</div>
+                  <div className="li-sub">{l.numCajas} cajas · bruto {fmtN(parseFloat(l.pesoBruto) || 0)} − tara {fmtN(parseFloat(l.tara) || 0)}</div>
+                </div>
+                <div className="li-right">
+                  <div className="li-val">{fmtN(l.neto)} kg</div>
+                  <button className="btn-ghost text-xs" style={{ color: "var(--red)" }} onClick={() => quitarLinea(l.id)}>quitar</button>
+                </div>
+              </div>
+            ))}
+            <div className="divider" />
+            <div className="flex-b"><span className="text-muted text-sm">Total cajas</span><span>{fmtN(totalCajas)}</span></div>
+            <div className="flex-b"><span className="text-muted text-sm">Total bruto</span><span>{fmtN(totalBruto)} kg</span></div>
+            <div className="flex-b"><span className="text-muted text-sm">Total tara</span><span>− {fmtN(totalTara)} kg</span></div>
+            <div className="flex-b" style={{ marginTop: 6 }}><span className="font-bold">PESO NETO TOTAL</span><span className="font-bold text-accent" style={{ fontSize: 20 }}>{fmtN(totalNeto)} kg</span></div>
+            <div className="form-group mt-2"><label className="form-label">Notas</label><textarea className="inp" rows="2" placeholder="Observaciones de la corrida" value={cor.notas} onChange={e => setCor(s => ({ ...s, notas: e.target.value }))} /></div>
+            <button className="btn btn-accent" style={{ width: "100%" }} onClick={guardarCorrida}>Guardar corrida (suma a inventario)</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* Remisión imprimible de una corrida */
+function RemisionCorrida({ cor }) {
+  return (
+    <div className="card" style={{ background: "#fff", color: "#1a1a1a" }}>
+      <div style={{ textAlign: "center", borderBottom: "2px solid #1f3a1e", paddingBottom: 12, marginBottom: 14 }}>
+        <div style={{ fontWeight: 800, fontSize: 18, color: "#1f3a1e" }}>AGROSELECTOS P&A</div>
+        <div style={{ fontSize: 13, color: "#666" }}>Remisión de corrida de ajo</div>
+        <div style={{ fontSize: 13, fontWeight: 700, marginTop: 4 }}>Folio: {cor.folio}</div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, fontSize: 13, marginBottom: 12 }}>
+        <div><b>Fecha:</b> {cor.fecha}</div>
+        <div><b>Cultivo:</b> {cor.cultivo}</div>
+        <div><b>Origen:</b> {cor.siembraNombre || "—"}</div>
+        <div><b>Responsable:</b> {cor.responsable || "—"}</div>
+      </div>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+        <thead>
+          <tr style={{ background: "#f0f0e8" }}>
+            <th style={{ textAlign: "left", padding: "6px 8px", border: "1px solid #ddd" }}>Calibre</th>
+            <th style={{ textAlign: "right", padding: "6px 8px", border: "1px solid #ddd" }}>Cajas</th>
+            <th style={{ textAlign: "right", padding: "6px 8px", border: "1px solid #ddd" }}>Bruto</th>
+            <th style={{ textAlign: "right", padding: "6px 8px", border: "1px solid #ddd" }}>Tara</th>
+            <th style={{ textAlign: "right", padding: "6px 8px", border: "1px solid #ddd" }}>Neto</th>
+          </tr>
+        </thead>
+        <tbody>
+          {cor.lineas.map(l => (
+            <tr key={l.id}>
+              <td style={{ padding: "5px 8px", border: "1px solid #ddd" }}>{labelCalibre(l.calibre)}{l.variedad ? ` · ${l.variedad}` : ""}</td>
+              <td style={{ textAlign: "right", padding: "5px 8px", border: "1px solid #ddd" }}>{fmtN(parseFloat(l.numCajas) || 0)}</td>
+              <td style={{ textAlign: "right", padding: "5px 8px", border: "1px solid #ddd" }}>{fmtN(parseFloat(l.pesoBruto) || 0)}</td>
+              <td style={{ textAlign: "right", padding: "5px 8px", border: "1px solid #ddd" }}>{fmtN(parseFloat(l.tara) || 0)}</td>
+              <td style={{ textAlign: "right", padding: "5px 8px", border: "1px solid #ddd", fontWeight: 700 }}>{fmtN(l.neto)}</td>
+            </tr>
+          ))}
+        </tbody>
+        <tfoot>
+          <tr style={{ background: "#f0f0e8", fontWeight: 700 }}>
+            <td style={{ padding: "6px 8px", border: "1px solid #ddd" }}>TOTAL</td>
+            <td style={{ textAlign: "right", padding: "6px 8px", border: "1px solid #ddd" }}>{fmtN(cor.totalCajas)}</td>
+            <td style={{ textAlign: "right", padding: "6px 8px", border: "1px solid #ddd" }}>{fmtN(cor.totalBruto)}</td>
+            <td style={{ textAlign: "right", padding: "6px 8px", border: "1px solid #ddd" }}>{fmtN(cor.totalTara)}</td>
+            <td style={{ textAlign: "right", padding: "6px 8px", border: "1px solid #ddd" }}>{fmtN(cor.totalNeto)}</td>
+          </tr>
+        </tfoot>
+      </table>
+      {cor.notas && <div style={{ fontSize: 12.5, marginTop: 12 }}><b>Notas:</b> {cor.notas}</div>}
+    </div>
+  );
+}
+
+/* ════════════ PANTALLA: ESTIBAS Y TRAZABILIDAD ════════════ */
+function Estibas({ data, add, upd, session, onClose }) {
+  const cultivos = [...new Set((data.cultivos || []).map(c => c.nombre))].filter(Boolean);
+  const [fase, setFase] = useState("barbecho");
+  const [crear, setCrear] = useState(false);
+  const F0 = { cajas: "", cultivo: cultivos[0] || "Ajo", siembraId: "", padres: [], nota: "" };
+  const [form, setForm] = useState(F0);
+  const [verEtiqueta, setVerEtiqueta] = useState(null); // estiba a mostrar como etiqueta
+  const [rastreo, setRastreo] = useState(null); // estiba a rastrear
+
+  const estibas = (data.estibas || []);
+  const activas = estibas.filter(e => e.estado === "activa");
+  // Para fase limpia/seleccion, los padres posibles son estibas activas de la fase anterior
+  const faseAnterior = { limpia: "barbecho", seleccion: "limpia" }[fase];
+  const padresPosibles = faseAnterior ? activas.filter(e => e.fase === faseAnterior) : [];
+
+  const nombreParcela = (pid) => (data.parcelas || []).find(p => p.id === pid)?.nombre || pid;
+
+  const togglePadre = (id) => setForm(f => ({
+    ...f, padres: f.padres.includes(id) ? f.padres.filter(x => x !== id) : [...f.padres, id]
+  }));
+
+  const guardar = () => {
+    if ((parseFloat(form.cajas) || 0) <= 0) { alert("Captura el número de cajas"); return; }
+    if (fase === "barbecho" && !form.siembraId) { alert("Para barbecho, elige la parcela/siembra de origen"); return; }
+    if (fase !== "barbecho" && form.padres.length === 0) { alert("Elige de qué estiba(s) viene"); return; }
+    const sb = (data.siembras || []).find(s => s.id === form.siembraId);
+    const nueva = crearEstiba(data, add, {
+      fase, cajas: form.cajas, cultivo: form.cultivo,
+      parcelaId: sb ? sb.parcelaId : "", siembraId: form.siembraId,
+      padres: form.padres, nota: form.nota,
+      registradoPor: { rol: session.role, id: session.id, nombre: session.nombre },
+    });
+    // Marcar las estibas padre como consumidas (ya pasaron a la siguiente fase)
+    form.padres.forEach(pid => {
+      const padre = estibas.find(e => e.id === pid);
+      if (padre) upd("estibas", { ...padre, estado: "consumida" });
+    });
+    setForm(F0); setCrear(false);
+    setVerEtiqueta(nueva); // mostrar la etiqueta para imprimir
+  };
+
+  // Vista de etiqueta imprimible
+  if (verEtiqueta) {
+    const e = verEtiqueta;
+    const parcelas = rastrearOrigen(data, e.id).map(nombreParcela);
+    return (
+      <div>
+        <div className="top-bar"><button className="btn-ghost" onClick={() => setVerEtiqueta(null)}>‹</button><h2>Etiqueta de estiba</h2></div>
+        <div className="section-pad">
+          <div className="card" style={{ background: "#fff", color: "#1a1a1a", textAlign: "center", border: "3px solid #1f3a1e" }}>
+            <div style={{ fontSize: 13, color: "#666", letterSpacing: 1 }}>AGROSELECTOS P&A</div>
+            <div style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>{(FASES_ESTIBA[e.fase] || {}).nombre}</div>
+            <div style={{ fontSize: 34, fontWeight: 800, letterSpacing: 2, color: "#1f3a1e", fontFamily: "monospace", margin: "10px 0" }}>{e.codigo}</div>
+            <div style={{ fontSize: 15, margin: "10px 0" }}><b>{fmtN(e.cajas)} cajas</b> · {e.cultivo}</div>
+            <div style={{ fontSize: 12, color: "#666" }}>Fecha: {e.fecha}</div>
+            {parcelas.length > 0 && <div style={{ fontSize: 12, color: "#666", marginTop: 6 }}>Origen: {parcelas.join(", ")}</div>}
+          </div>
+          <div className="gap-row mt-2">
+            <button className="btn btn-outline" onClick={() => window.print()}>🖨️ Imprimir etiqueta</button>
+            <button className="btn btn-accent" onClick={() => setVerEtiqueta(null)}>Listo</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Vista de rastreo (genealogía)
+  if (rastreo) {
+    const parcelas = rastrearOrigen(data, rastreo.id).map(nombreParcela);
+    const cadena = [];
+    const construir = (id, nivel) => {
+      const e = estibas.find(x => x.id === id);
+      if (!e) return;
+      cadena.push({ e, nivel });
+      (e.padres || []).forEach(pid => construir(pid, nivel + 1));
+    };
+    construir(rastreo.id, 0);
+    return (
+      <div>
+        <div className="top-bar"><button className="btn-ghost" onClick={() => setRastreo(null)}>‹</button><h2>Trazabilidad 🔍</h2></div>
+        <div className="section-pad">
+          <div className="card" style={{ background: "rgba(126,200,50,.08)", border: "1px solid rgba(126,200,50,.25)" }}>
+            <div className="text-sm font-bold">{rastreo.codigo}</div>
+            <div className="text-sm text-muted mt-1">Parcelas de origen: <b>{parcelas.length > 0 ? parcelas.join(", ") : "—"}</b></div>
+          </div>
+          <div className="card">
+            <div className="card-title">Cadena de origen (genealogía)</div>
+            {cadena.map(({ e, nivel }, i) => (
+              <div key={e.id + i} className="list-item" style={{ paddingLeft: 12 + nivel * 18 }}>
+                <div className="li-icon">{nivel === 0 ? "📦" : "↳"}</div>
+                <div className="li-body">
+                  <div className="li-title" style={{ fontFamily: "monospace" }}>{e.codigo}</div>
+                  <div className="li-sub">{(FASES_ESTIBA[e.fase] || {}).nombre} · {fmtN(e.cajas)} cajas{e.parcelaId ? ` · ${nombreParcela(e.parcelaId)}` : ""}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="top-bar"><button className="btn-ghost" onClick={onClose}>‹</button><h2>Estibas y trazabilidad 🏷️</h2></div>
+      <div className="section-pad">
+        <div className="text-xs text-muted mb-3" style={{ paddingLeft: 4 }}>
+          Cada estiba recibe un código para etiquetarla. Al avanzar de fase, las estibas nuevas recuerdan de dónde vienen — así rastreas cualquier ajo hasta su parcela.
+        </div>
+
+        {/* Selector de fase */}
+        <div className="tabs-pill" style={{ marginBottom: 12 }}>
+          <button className={`tab-pill${fase === "barbecho" ? " active" : ""}`} onClick={() => { setFase("barbecho"); setForm(F0); }}>Barbecho</button>
+          <button className={`tab-pill${fase === "limpia" ? " active" : ""}`} onClick={() => { setFase("limpia"); setForm(F0); }}>2ª limpia</button>
+          <button className={`tab-pill${fase === "seleccion" ? " active" : ""}`} onClick={() => { setFase("seleccion"); setForm(F0); }}>Selección</button>
+        </div>
+
+        <button className="btn btn-accent" style={{ width: "100%", marginBottom: 14 }} onClick={() => { setCrear(v => !v); setForm(F0); }}>
+          {crear ? "✕ Cancelar" : `+ Nueva estiba de ${(FASES_ESTIBA[fase] || {}).nombre.split(" ")[0].toLowerCase()}`}
+        </button>
+
+        {crear && (
+          <div className="card">
+            <div className="card-title">Nueva estiba · {(FASES_ESTIBA[fase] || {}).nombre}</div>
+            <div className="form-group"><label className="form-label">Cultivo</label>
+              <select className="inp" value={form.cultivo} onChange={e => setForm(f => ({ ...f, cultivo: e.target.value }))}>
+                {cultivos.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+            {fase === "barbecho" ? (
+              <div className="form-group"><label className="form-label">🔗 Parcela / siembra de origen</label>
+                <select className="inp" value={form.siembraId} onChange={e => setForm(f => ({ ...f, siembraId: e.target.value }))}>
+                  <option value="">Elegir…</option>
+                  {(data.siembras || []).filter(s => s.cultivoNombre === form.cultivo && s.estado !== "cancelada").map(s => {
+                    const p = (data.parcelas || []).find(x => x.id === s.parcelaId);
+                    return <option key={s.id} value={s.id}>{p?.nombre || "Parcela"}{s.variedadNombre ? ` · ${s.variedadNombre}` : ""}</option>;
+                  })}
+                </select>
+              </div>
+            ) : (
+              <div className="form-group">
+                <label className="form-label">🔗 ¿De qué estiba(s) viene? (puedes combinar varias)</label>
+                {padresPosibles.length === 0 && <div className="text-xs text-muted">No hay estibas activas de la fase anterior. Crea primero las de {faseAnterior}.</div>}
+                {padresPosibles.map(e => (
+                  <label key={e.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", cursor: "pointer", fontSize: 14 }}>
+                    <input type="checkbox" checked={form.padres.includes(e.id)} onChange={() => togglePadre(e.id)} />
+                    <span style={{ fontFamily: "monospace" }}>{e.codigo}</span>
+                    <span className="text-muted">({fmtN(e.cajas)} cajas{e.parcelaId ? ` · ${nombreParcela(e.parcelaId)}` : ""})</span>
+                  </label>
+                ))}
+              </div>
+            )}
+            <div className="form-group"><label className="form-label">Número de cajas en esta estiba</label><input type="number" className="inp" placeholder="0" value={form.cajas} onChange={e => setForm(f => ({ ...f, cajas: e.target.value }))} /></div>
+            <div className="form-group"><label className="form-label">Nota</label><input className="inp" placeholder="Opcional" value={form.nota} onChange={e => setForm(f => ({ ...f, nota: e.target.value }))} /></div>
+            <button className="btn btn-accent" style={{ width: "100%" }} onClick={guardar}>Crear estiba y generar código</button>
+          </div>
+        )}
+
+        {/* Estibas activas de la fase seleccionada */}
+        <div className="card">
+          <div className="card-title">Estibas activas · {(FASES_ESTIBA[fase] || {}).nombre}</div>
+          {activas.filter(e => e.fase === fase).length === 0 && (
+            <div className="text-muted text-sm" style={{ textAlign: "center", padding: "20px 0" }}>No hay estibas activas en esta fase.</div>
+          )}
+          {activas.filter(e => e.fase === fase).slice().reverse().map(e => (
+            <div key={e.id} className="list-item">
+              <div className="li-icon">🏷️</div>
+              <div className="li-body">
+                <div className="li-title" style={{ fontFamily: "monospace" }}>{e.codigo}</div>
+                <div className="li-sub">{fmtN(e.cajas)} cajas · {e.cultivo}{e.parcelaId ? ` · ${nombreParcela(e.parcelaId)}` : ""}</div>
+              </div>
+              <div className="li-right" style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                <button className="btn-ghost text-xs" onClick={() => setVerEtiqueta(e)}>etiqueta</button>
+                <button className="btn-ghost text-xs" onClick={() => setRastreo(e)}>rastrear</button>
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
